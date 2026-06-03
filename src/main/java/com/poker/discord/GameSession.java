@@ -425,18 +425,43 @@ public class GameSession {
 
         long toCall = game.callAmountFor(p);
         long allInTo = p.streetCommitted + p.stack;
+        boolean canRaise = p.stack > toCall; // chips beyond the call -> a (re)raise/all-in raise is possible
+
+        String betLine;
+        if (toCall == 0) {
+            betLine = "Min bet: **" + bb + "**";
+        } else if (canRaise) {
+            betLine = "To call: **" + toCall + "** • Min raise to: **" + game.minRaiseTo() + "**";
+        } else {
+            betLine = "To call: **" + toCall + "** (all-in) — you can only call or fold";
+        }
         String content = mention(p.userId) + " — **your turn**.\n"
-                + "To call: **" + toCall + "** • Your stack: **" + p.stack + "** • Pot: **" + game.totalPot() + "**\n"
-                + "Min " + (game.currentBet() == 0 ? "bet: **" + bb + "**" : "raise to: **" + game.minRaiseTo() + "**")
-                + " • You have 30s to act.";
+                + "Your stack: **" + p.stack + "** • Pot: **" + game.totalPot() + "**\n"
+                + betLine + " • You have 30s to act.";
 
-        Button fold = Button.danger("act:fold", "Fold");
-        Button check = Button.secondary("act:check", "Check").withDisabled(toCall > 0);
-        Button call = Button.success("act:call", toCall > 0 ? "Call " + toCall : "Call").withDisabled(toCall == 0);
-        Button raise = Button.primary("act:raise", game.currentBet() == 0 ? "Bet" : "Raise").withDisabled(p.stack <= 0);
-        Button allin = Button.secondary("act:allin", "All-in " + allInTo).withDisabled(p.stack <= 0);
+        // Context-specific buttons, modelled on PokerGPT's call / check / all-in views:
+        // only the actions that are actually legal right now are shown.
+        List<Button> buttons = new ArrayList<>();
+        if (toCall == 0) {
+            // Nothing to call -> Check / Bet / All-in / Fold
+            buttons.add(Button.primary("act:check", "Check"));
+            buttons.add(Button.success("act:raise", "Bet"));
+            buttons.add(Button.success("act:allin", "All-in " + allInTo));
+            buttons.add(Button.danger("act:fold", "Fold"));
+        } else if (canRaise) {
+            // Facing a bet, can raise -> Call / Raise / All-in / Fold
+            buttons.add(Button.primary("act:call", "Call " + toCall));
+            buttons.add(Button.success("act:raise", "Raise"));
+            buttons.add(Button.success("act:allin", "All-in " + allInTo));
+            buttons.add(Button.danger("act:fold", "Fold"));
+        } else {
+            // Calling uses your whole stack -> Call all-in / Fold
+            buttons.add(Button.primary("act:call",
+                    toCall >= p.stack ? "Call all-in " + p.stack : "Call " + toCall));
+            buttons.add(Button.danger("act:fold", "Fold"));
+        }
 
-        actionMessageId = postHand(content, ActionRow.of(fold, check, call, raise, allin));
+        actionMessageId = postHand(content, ActionRow.of(buttons));
 
         int token = ++actionSeq;
         reminderTask = exec.schedule(() -> onReminder(token),
