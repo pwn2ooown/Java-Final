@@ -26,6 +26,12 @@ public class PokerListener extends ListenerAdapter {
 
     @Override
     public void onSlashCommandInteraction(SlashCommandInteractionEvent event) {
+        log.info("Slash '{}{}' from {} ({}) guild={} channel={} type={}",
+                event.getName(),
+                event.getSubcommandName() != null ? " " + event.getSubcommandName() : "",
+                event.getUser().getName(), event.getUser().getId(),
+                event.getGuild() != null ? event.getGuild().getId() : "none",
+                event.getChannel().getId(), event.getChannelType());
         try {
             switch (event.getName()) {
                 case "poker" -> handlePoker(event);
@@ -137,6 +143,8 @@ public class PokerListener extends ListenerAdapter {
         long userId = event.getUser().getIdLong();
         String userName = event.getUser().getEffectiveName();
         GameSession session = manager.resolve(channelId);
+        log.info("Button '{}' from {} ({}) channel={} sessionFound={}",
+                id, userName, userId, channelId, session != null);
 
         // The raise button opens a modal — it must be the initial response (no defer).
         if (id.equals("act:raise")) {
@@ -194,6 +202,8 @@ public class PokerListener extends ListenerAdapter {
 
     @Override
     public void onModalInteraction(ModalInteractionEvent event) {
+        log.info("Modal '{}' from {} ({}) channel={}", event.getModalId(),
+                event.getUser().getName(), event.getUser().getId(), event.getChannel().getId());
         if (!"act:raisemodal".equals(event.getModalId())) {
             return;
         }

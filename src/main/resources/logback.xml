@@ -7,7 +7,8 @@
 
     <!-- JDA is fairly chatty on DEBUG; keep it at INFO -->
     <logger name="net.dv8tion" level="INFO"/>
-    <logger name="com.poker" level="INFO"/>
+    <!-- Our own logs at DEBUG so you can see every interaction the bot receives -->
+    <logger name="com.poker" level="DEBUG"/>
 
     <root level="INFO">
         <appender-ref ref="STDOUT"/>

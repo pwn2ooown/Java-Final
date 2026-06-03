@@ -230,8 +230,12 @@ public class GameSession {
 
     private void doInit(InteractionHook hook) {
         try {
+            log.info("Opening room: guild={} parentChannel={} owner={} ({})",
+                    guildId, parentChannelId, ownerName, ownerId);
             TextChannel parent = manager.jda().getTextChannelById(parentChannelId);
             if (parent == null) {
+                log.warn("doInit: text channel {} not visible to the bot (missing access or not a guild member)",
+                        parentChannelId);
                 ephem(hook, "⚠️ I can no longer see this channel.");
                 manager.unregister(this);
                 return;
@@ -241,6 +245,7 @@ public class GameSession {
 
             ThreadChannel thread = parent.createThreadChannel("poker-" + sanitize(ownerName), true).complete();
             threadId = thread.getIdLong();
+            log.info("Created private thread {} for room (parent {})", threadId, parentChannelId);
             manager.registerThread(threadId, this);
             manager.db().setThread(roomDbId, str(threadId));
 

@@ -36,6 +36,22 @@ public class Main {
         manager.setJda(jda);
         jda.awaitReady();
 
+        log.info("Logged in as {} (id {})", jda.getSelfUser().getName(), jda.getSelfUser().getId());
+        List<Guild> guilds = jda.getGuilds();
+        if (guilds.isEmpty()) {
+            log.warn("==================================================================");
+            log.warn("The bot is not a member of ANY server!");
+            log.warn("It was almost certainly invited WITHOUT the 'bot' scope.");
+            log.warn("Re-invite using an OAuth2 URL with scope=bot+applications.commands");
+            log.warn("(see README 'Invite the bot to your server'). Slash commands can");
+            log.warn("appear without the bot actually joining — that causes 'timeouts'.");
+            log.warn("==================================================================");
+        } else {
+            for (Guild g : guilds) {
+                log.info("Member of guild: {} (id {})", g.getName(), g.getId());
+            }
+        }
+
         registerCommands(jda, guildId);
         log.info("Poker bot is ready.");
 
