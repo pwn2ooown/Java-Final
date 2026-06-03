@@ -36,6 +36,7 @@ public class GameSession {
 
     private static final Logger log = LoggerFactory.getLogger(GameSession.class);
     private static final long ACTION_TIMEOUT_SECONDS = 30;
+    private static final long REMINDER_BEFORE_SECONDS = 10;
     private static final long RESULT_LINGER_SECONDS = 8;
 
     private final GameManager manager;
@@ -63,6 +64,7 @@ public class GameSession {
     private long pendingActorId;
     private int actionSeq;
     private ScheduledFuture<?> timeoutTask;
+    private ScheduledFuture<?> reminderTask;
     private long joinCounter;
 
     private volatile boolean started;
@@ -202,6 +204,11 @@ public class GameSession {
                     t = ActionType.RAISE;
                 }
                 game.applyAction(userId, t, amount);
+                // A voluntary action clears any timeout warning (strikes count only consecutively).
+                Player self = game.playerById(userId);
+                if (self != null) {
+                    self.timeoutStrikes = 0;
+                }
                 cancelTimeout();
                 ephem(hook, confirm(t, amount));
                 proceed();
@@ -424,7 +431,21 @@ public class GameSession {
         actionMessageId = postHand(content, ActionRow.of(fold, check, call, raise, allin));
 
         int token = ++actionSeq;
+        reminderTask = exec.schedule(() -> onReminder(token),
+                ACTION_TIMEOUT_SECONDS - REMINDER_BEFORE_SECONDS, TimeUnit.SECONDS);
         timeoutTask = exec.schedule(() -> onTimeout(token), ACTION_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+    }
+
+    private void onReminder(int token) {
+        if (token != actionSeq || ended) {
+            return; // stale or finished
+        }
+        Player cur = game.currentActor();
+        if (cur == null) {
+            return;
+        }
+        postHand("⏰ " + mention(cur.userId) + " — about " + REMINDER_BEFORE_SECONDS
+                + " seconds left to act, or you'll be folded automatically.");
     }
 
     private void onTimeout(int token) {
@@ -577,7 +598,8 @@ public class GameSession {
                     b.append("↩️ Returned ").append(amt).append(" (uncalled) to ").append(mention(uid)).append("\n"));
         }
         b.append("\n").append(standingsBlock());
-        postHand(b.toString());
+        // Kept (not tracked for cleanup) so each hand's result stays in the thread as history.
+        postKept(b.toString());
     }
 
     private void postTableState() {
@@ -671,6 +693,16 @@ public class GameSession {
         }
     }
 
+    /** Posts a message that is deliberately NOT tracked for cleanup (kept as history). */
+    private void postKept(String content) {
+        ThreadChannel t = thread();
+        if (t != null) {
+            t.sendMessage(content).queue(s -> {
+            }, e -> {
+            });
+        }
+    }
+
     private void disablePreviousActionButtons() {
         if (actionMessageId == 0) {
             return;
@@ -701,6 +733,10 @@ public class GameSession {
         if (timeoutTask != null) {
             timeoutTask.cancel(false);
             timeoutTask = null;
+        }
+        if (reminderTask != null) {
+            reminderTask.cancel(false);
+            reminderTask = null;
         }
         actionSeq++;
         pendingActorId = 0;

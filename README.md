@@ -16,7 +16,7 @@ is posted in the thread, and every player sees only their own hole cards via
 - Correct **No-Limit betting rules**: bet ≥ 1 BB or all-in, proper **min-raise**, and the **incomplete all-in raise** rule (a short all-in does not re-open the betting for players who already acted).
 - **Turn lock**: only the player to act can act; anyone else is rejected.
 - **Side pots** computed automatically for any number of all-ins, with **uncalled bets refunded**.
-- **30-second timer** per turn: 1st timeout = auto-fold (warning), 2nd timeout = kicked from the room.
+- **30-second timer** per turn with a **~10s reminder ping**: 1st timeout = auto-fold (warning), a **2nd *consecutive* timeout = kicked**. Acting in time clears the warning.
 - Quit any time (auto-folds the current hand, no longer dealt in), join any time (seated next hand).
 - If the **owner leaves/is kicked**, the next player by join order becomes owner.
 - At least **2 players** required to start.
@@ -171,8 +171,8 @@ JUnit tests in `src/test/java`.
 
 ## Design Notes & Assumptions
 
-- **Buy-in is fixed at open.** Busted players (stack 0) are removed before the next hand; there is no re-buy.
-- **Timeout strikes are cumulative per player for the life of the room** (1st = auto-fold, 2nd = kick), not reset by acting in between.
-- **Hand messages are deleted** a few seconds after each hand's result is shown, to keep the thread clean.
+- **One thread = one table** (a `GameSession`), which loops many hands until the owner ends it. **One active room per text channel** (different channels can each host their own table).
+- **Buy-in is fixed at open.** Busted players (stack 0) are **removed** from the room before the next hand; there is no re-buy.
+- **Timeout strikes count consecutively.** A `~10s` reminder is posted before the 30s deadline; the 1st timeout auto-folds (warning), a 2nd *consecutive* timeout kicks. Taking a valid action resets the warning.
+- **Per-hand cleanup keeps the result.** A few seconds after each hand, the play messages (state board, action prompts, reminders) are deleted, but the **hand's result summary is kept** in the thread as history.
 - A bot restart ends any in-progress hand; the database keeps room/player/stack and hand-history records.
-- One active room per text channel.
