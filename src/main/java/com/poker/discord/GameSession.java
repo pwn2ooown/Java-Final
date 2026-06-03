@@ -203,14 +203,17 @@ public class GameSession {
                 } else if (t == ActionType.BET && game.currentBet() > 0) {
                     t = ActionType.RAISE;
                 }
+                Player self = game.playerById(userId);
+                long beforeStack = self == null ? 0 : self.stack;
                 game.applyAction(userId, t, amount);
                 // A voluntary action clears any timeout warning (strikes count only consecutively).
-                Player self = game.playerById(userId);
                 if (self != null) {
                     self.timeoutStrikes = 0;
                 }
+                long committed = self == null ? 0 : beforeStack - self.stack;
+                boolean nowAllIn = self != null && self.stack == 0;
                 cancelTimeout();
-                ephem(hook, confirm(t, amount));
+                ephem(hook, confirm(t, amount, committed, nowAllIn));
                 proceed();
             } catch (InvalidActionException e) {
                 ephem(hook, "❌ " + e.getMessage());
@@ -474,12 +477,11 @@ public class GameSession {
 
     private void finishHand(boolean reveal) {
         cancelTimeout();
-        long pot = game.totalPot();
         boolean showdown = reveal && game.aliveInHand() >= 2;
         HandResult result = game.settle(showdown);
         postTableState();
         postResults(result);
-        persist(result, pot);
+        persist(result);
 
         exec.schedule(() -> {
             cleanupHandMessages();
@@ -555,16 +557,23 @@ public class GameSession {
     // Persistence
     // ------------------------------------------------------------------
 
-    private void persist(HandResult result, long pot) {
+    private void persist(HandResult result) {
         try {
+            long pot = result.awards.stream().mapToLong(a -> a.amount).sum();
             long handId = manager.db().recordHand(roomDbId, game.handNumber(), cardsPlain(result.board), pot);
+            if (handId < 0) {
+                return;
+            }
             for (HandResult.PotAward award : result.awards) {
-                long share = award.winners.isEmpty() ? 0 : award.amount / award.winners.size();
-                for (long winner : award.winners) {
-                    Player p = game.playerById(winner);
+                for (var payout : award.payouts.entrySet()) {
+                    Player p = game.playerById(payout.getKey());
                     String hole = (p != null) ? cardsPlain(p.hole) : "";
-                    manager.db().recordResult(handId, str(winner), share, hole, award.handDesc);
+                    manager.db().recordResult(handId, str(payout.getKey()), payout.getValue(), hole, award.handDesc);
                 }
+            }
+            for (var refund : result.refunds.entrySet()) {
+                manager.db().recordResult(handId, str(refund.getKey()), refund.getValue(), "",
+                        "Uncalled bet returned");
             }
             for (Player p : game.seats()) {
                 manager.db().updateStack(roomDbId, str(p.userId), p.stack);
@@ -774,14 +783,16 @@ public class GameSession {
     // Small utilities
     // ------------------------------------------------------------------
 
-    private String confirm(ActionType type, long amount) {
+    static String confirm(ActionType type, long amount, long committed, boolean nowAllIn) {
         return switch (type) {
             case FOLD -> "🃏 You folded.";
             case CHECK -> "✅ You checked.";
-            case CALL -> "✅ You called.";
+            case CALL -> "✅ You called " + committed + ".";
             case BET -> "✅ You bet " + amount + ".";
             case RAISE -> "✅ You raised to " + amount + ".";
-            case ALL_IN -> "💥 You are all-in!";
+            case ALL_IN -> nowAllIn
+                    ? "💥 You are all-in for " + committed + "!"
+                    : "✅ You called " + committed + ".";
         };
     }
 

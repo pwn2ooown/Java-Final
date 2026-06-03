@@ -15,6 +15,7 @@ public class HandResult {
         public final String label;     // "Main pot", "Side pot 1", ...
         public final long amount;
         public final List<Long> winners = new ArrayList<>();
+        public final Map<Long, Long> payouts = new LinkedHashMap<>();
         public String handDesc;         // winning hand category, or "(uncontested)"
 
         public PotAward(String label, long amount) {

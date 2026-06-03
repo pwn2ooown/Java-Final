@@ -224,6 +224,9 @@ public class PokerGame {
 
     /** Minimum legal "raise to" total for a full raise (ignoring all-in shortfalls). */
     public long minRaiseTo() {
+        if (currentBet > 0 && currentBet < bigBlind) {
+            return bigBlind;
+        }
         return currentBet + lastFullRaiseSize;
     }
 
@@ -403,11 +406,13 @@ public class PokerGame {
 
     /** Shared bookkeeping for a bet/raise: update the call price and re-open (or not) the action. */
     private void applyAggression(Player p, long newBetTo) {
-        long raiseSize = newBetTo - currentBet;
+        long previousBet = currentBet;
+        long raiseSize = newBetTo - previousBet;
         currentBet = newBetTo;
-        if (raiseSize >= lastFullRaiseSize) {
-            // A full raise re-opens the betting to everyone.
-            lastFullRaiseSize = raiseSize;
+        boolean completesShortOpeningBet = previousBet > 0 && previousBet < bigBlind && newBetTo >= bigBlind;
+        if (completesShortOpeningBet || raiseSize >= lastFullRaiseSize) {
+            // A full opening bet or full raise re-opens the betting to everyone.
+            lastFullRaiseSize = completesShortOpeningBet ? bigBlind : raiseSize;
             actedSinceFullRaise.clear();
         }
         // An incomplete (short all-in) raise leaves the acted set intact.
@@ -525,8 +530,10 @@ public class PokerGame {
             for (int w = 0; w < order.size(); w++) {
                 int seat = order.get(w);
                 long amt = share + (w < remainder ? 1 : 0);
-                players.get(seat).stack += amt;
-                award.winners.add(players.get(seat).userId);
+                Player winner = players.get(seat);
+                winner.stack += amt;
+                award.winners.add(winner.userId);
+                award.payouts.merge(winner.userId, amt, Long::sum);
             }
             result.awards.add(award);
         }

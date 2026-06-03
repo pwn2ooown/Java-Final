@@ -63,6 +63,43 @@ class PokerGameTest {
     }
 
     @Test
+    void shortAllInOpeningBetCanBeCompletedToBigBlind() {
+        PokerGame g = newGame(1000, 10, 20, 100, 101, 102);
+        g.startHand();
+        g.applyAction(100, ActionType.CALL, 0);
+        g.applyAction(101, ActionType.CALL, 0);
+        g.applyAction(102, ActionType.CHECK, 0);
+        g.dealNextStreet();
+
+        g.playerById(101).stack = 5;
+        g.applyAction(101, ActionType.BET, 5);
+
+        assertEquals(20, g.minRaiseTo());
+        g.applyAction(102, ActionType.RAISE, 20);
+        assertEquals(20, g.currentBet());
+        assertEquals(40, g.minRaiseTo());
+    }
+
+    @Test
+    void completingShortAllInOpeningBetReopensAction() {
+        PokerGame g = newGame(1000, 10, 20, 100, 101, 102);
+        g.startHand();
+        g.applyAction(100, ActionType.CALL, 0);
+        g.applyAction(101, ActionType.CALL, 0);
+        g.applyAction(102, ActionType.CHECK, 0);
+        g.dealNextStreet();
+
+        g.playerById(101).stack = 5;
+        g.applyAction(101, ActionType.BET, 5);
+        g.applyAction(102, ActionType.CALL, 0);
+        g.applyAction(100, ActionType.RAISE, 20);
+
+        assertEquals(102, g.currentActor().userId);
+        g.applyAction(102, ActionType.RAISE, 40);
+        assertEquals(40, g.currentBet());
+    }
+
+    @Test
     void foldToLastPlayerAwardsBlinds() {
         PokerGame g = newGame(1000, 10, 20, 100, 101, 102);
         g.startHand();
