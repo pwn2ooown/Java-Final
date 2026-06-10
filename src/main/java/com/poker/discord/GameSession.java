@@ -509,22 +509,9 @@ public class GameSession {
         long allInTo = p.streetCommitted + p.stack;
         boolean canRaise = p.stack > toCall;
 
-        String betLine;
-        if (toCall == 0) {
-            betLine = "Min bet: **" + bb + "**";
-        } else if (canRaise) {
-            betLine = "To call: **" + toCall + "** • Min raise to: **" + game.minRaiseTo() + "**";
-        } else {
-            betLine = "To call: **" + toCall + "** (all-in)";
-        }
-
         StringBuilder content = new StringBuilder();
         content.append(tableText()).append("\n");
-        content.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
-        content.append("🎯 ").append(mention(p.userId)).append(" — **YOUR TURN**\n");
-        content.append("Stack: **").append(p.stack).append("** • Pot: **")
-                .append(game.totalPot()).append("** • ").append(betLine).append("\n");
-        content.append("⏰ 30s to act");
+        content.append("🎯 ").append(mention(p.userId)).append(" — **YOUR TURN** ⏰ 30s");
 
         List<Button> buttons = new ArrayList<>();
         if (toCall == 0) {
@@ -834,6 +821,18 @@ public class GameSession {
             String status = !st.isEmpty() ? st : act;
             b.append(String.format("%s%s %-16s stack:%-7d bet:%-6d %s%n",
                     turn, dealer, trunc(p.name), p.stack, p.streetCommitted, status));
+        }
+        if (cur != null) {
+            long toCall = game.callAmountFor(cur);
+            b.append("--------------------------------------\n");
+            if (toCall == 0) {
+                b.append("To act: ").append(cur.name).append("  Min bet: ").append(bb).append("\n");
+            } else if (cur.stack > toCall) {
+                b.append("To act: ").append(cur.name).append("  Call: ").append(toCall)
+                        .append("  Min raise: ").append(game.minRaiseTo()).append("\n");
+            } else {
+                b.append("To act: ").append(cur.name).append("  Call: ").append(toCall).append(" (all-in)\n");
+            }
         }
         b.append("```");
         return b.toString();
