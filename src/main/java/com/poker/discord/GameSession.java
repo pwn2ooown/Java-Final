@@ -294,6 +294,7 @@ public class GameSession {
                 boolean nowAllIn = self != null && self.stack == 0;
                 cancelTimeout();
                 ephem(hook, confirm(t, amount, committed, nowAllIn));
+                postHand(actionAnnounce(userId, t, amount, committed, nowAllIn));
                 proceed();
             } catch (InvalidActionException e) {
                 ephem(hook, "❌ " + e.getMessage());
@@ -999,6 +1000,20 @@ public class GameSession {
             case ALL_IN -> nowAllIn
                     ? "🔺 You are all-in for " + committed + "!"
                     : "✅ You called " + committed + ".";
+        };
+    }
+
+    private String actionAnnounce(long userId, ActionType type, long amount, long committed, boolean nowAllIn) {
+        String who = mention(userId);
+        return switch (type) {
+            case FOLD -> "🃏 " + who + " folds.";
+            case CHECK -> "✅ " + who + " checks.";
+            case CALL -> "✅ " + who + " calls " + committed + ".";
+            case BET -> "✅ " + who + " bets " + amount + ".";
+            case RAISE -> "✅ " + who + " raises to " + amount + ".";
+            case ALL_IN -> nowAllIn
+                    ? "🔺 " + who + " is all-in for " + committed + "!"
+                    : "✅ " + who + " calls " + committed + ".";
         };
     }
 
