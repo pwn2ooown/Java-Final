@@ -65,6 +65,7 @@ public class GameSession {
     private final List<Long> handMessageIds = new ArrayList<>();
     private final Map<Long, List<Card>> lastHoleCards = new ConcurrentHashMap<>();
     private final Set<Long> shownCards = ConcurrentHashMap.newKeySet();
+    private final Map<Long, String> lastActions = new ConcurrentHashMap<>();
     private volatile long threadId;
     private volatile long ownerId;
 
@@ -287,8 +288,8 @@ public class GameSession {
                 long committed = self == null ? 0 : beforeStack - self.stack;
                 boolean nowAllIn = self != null && self.stack == 0;
                 cancelTimeout();
+                lastActions.put(userId, actionShort(t, amount, committed, nowAllIn));
                 ephem(hook, confirm(t, amount, committed, nowAllIn));
-                postHand(actionAnnounce(userId, t, amount, committed, nowAllIn));
                 proceed();
             } catch (InvalidActionException e) {
                 ephem(hook, "❌ " + e.getMessage());
@@ -446,6 +447,7 @@ public class GameSession {
         manager.db().setState(roomDbId, "PLAYING");
         handMessageIds.clear();
         actionMessageId = 0;
+        lastActions.clear();
 
         log.info("Hand #{} starting: {} players, button={}",
                 game.handNumber(), game.seats().size(), game.buttonUserId());
@@ -473,6 +475,7 @@ public class GameSession {
                     return;
                 }
                 int ableNow = game.ableToAct();
+                lastActions.clear();
                 game.dealNextStreet();
                 log.debug("Hand #{}: dealt {} — board: {} (ableToAct={})",
                         game.handNumber(), game.street(), cardsPlain(game.board()), ableNow);
@@ -574,15 +577,18 @@ public class GameSession {
         if (cur.timeoutStrikes == 0) {
             cur.timeoutStrikes = 1;
             if (toCall == 0) {
+                lastActions.put(uid, "check (timeout)");
                 postRoom("⏰ " + mention(uid) + " ran out of time — auto-checked. "
                         + "(Warning 1/2 — a second timeout means a kick.)");
                 game.applyAction(uid, ActionType.CHECK, 0);
             } else {
+                lastActions.put(uid, "fold (timeout)");
                 postRoom("⏰ " + mention(uid) + " ran out of time — auto-folded. "
                         + "(Warning 1/2 — a second timeout means a kick.)");
                 game.applyAction(uid, ActionType.FOLD, 0);
             }
         } else {
+            lastActions.put(uid, "fold (kicked)");
             postRoom("⏰ " + mention(uid) + " timed out again and was **kicked** from the room.");
             game.applyAction(uid, ActionType.FOLD, 0);
             cur.wantsLeave = true;
@@ -824,8 +830,10 @@ public class GameSession {
             String turn = (cur != null && cur.userId == p.userId) ? ">" : " ";
             String dealer = (p.userId == game.buttonUserId()) ? "D" : " ";
             String st = p.folded ? "folded" : p.allIn ? "all-in" : (!p.inHand ? "sitting out" : "");
+            String act = lastActions.getOrDefault(p.userId, "");
+            String status = !st.isEmpty() ? st : act;
             b.append(String.format("%s%s %-16s stack:%-7d bet:%-6d %s%n",
-                    turn, dealer, trunc(p.name), p.stack, p.streetCommitted, st));
+                    turn, dealer, trunc(p.name), p.stack, p.streetCommitted, status));
         }
         b.append("```");
         return b.toString();
@@ -1013,17 +1021,14 @@ public class GameSession {
         };
     }
 
-    private String actionAnnounce(long userId, ActionType type, long amount, long committed, boolean nowAllIn) {
-        String who = mention(userId);
+    private static String actionShort(ActionType type, long amount, long committed, boolean nowAllIn) {
         return switch (type) {
-            case FOLD -> "🃏 " + who + " folds.";
-            case CHECK -> "✅ " + who + " checks.";
-            case CALL -> "✅ " + who + " calls " + committed + ".";
-            case BET -> "✅ " + who + " bets " + amount + ".";
-            case RAISE -> "✅ " + who + " raises to " + amount + ".";
-            case ALL_IN -> nowAllIn
-                    ? "🔺 " + who + " is all-in for " + committed + "!"
-                    : "✅ " + who + " calls " + committed + ".";
+            case FOLD -> "fold";
+            case CHECK -> "check";
+            case CALL -> "call " + committed;
+            case BET -> "bet " + amount;
+            case RAISE -> "raise " + amount;
+            case ALL_IN -> nowAllIn ? "all-in " + committed : "call " + committed;
         };
     }
 
