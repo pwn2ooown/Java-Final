@@ -497,21 +497,19 @@ public class GameSession {
                     toCall >= p.stack ? "Call all-in " + p.stack : "Call " + toCall));
             buttons.add(Button.danger("act:fold", "Fold"));
         }
-
-        ActionRow actRow = ActionRow.of(buttons);
-        ActionRow cardRow = ActionRow.of(Button.secondary("act:cards", "🂠 View my cards"));
+        buttons.add(Button.secondary("act:cards", "🂠 View my cards"));
 
         if (!game.board().isEmpty()) {
             try {
                 byte[] boardImg = CardRenderer.renderCards(game.board());
-                actionMessageId = postHandWithImageRows(content.toString(), boardImg, "board.png",
-                        actRow, cardRow);
+                actionMessageId = postHandWithImage(content.toString(), boardImg, "board.png",
+                        ActionRow.of(buttons));
             } catch (Exception e) {
                 log.warn("Card image rendering failed, using text fallback", e);
-                actionMessageId = postHandRows(content.toString(), actRow, cardRow);
+                actionMessageId = postHand(content.toString(), ActionRow.of(buttons));
             }
         } else {
-            actionMessageId = postHandRows(content.toString(), actRow, cardRow);
+            actionMessageId = postHand(content.toString(), ActionRow.of(buttons));
         }
 
         int token = ++actionSeq;
