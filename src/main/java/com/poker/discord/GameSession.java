@@ -69,7 +69,6 @@ public class GameSession {
     private volatile long ownerId;
 
     private long actionMessageId;
-    private long pendingActorId;
     private int actionSeq;
     private ScheduledFuture<?> timeoutTask;
     private ScheduledFuture<?> reminderTask;
@@ -501,7 +500,6 @@ public class GameSession {
         if (p == null) {
             return;
         }
-        pendingActorId = p.userId;
         disablePreviousActionButtons();
 
         long toCall = game.callAmountFor(p);
@@ -896,35 +894,6 @@ public class GameSession {
         }
     }
 
-    private long postHandRows(String content, ActionRow... rows) {
-        ThreadChannel t = thread();
-        if (t == null) return 0;
-        try {
-            long id = t.sendMessage(content).setComponents(rows).complete().getIdLong();
-            handMessageIds.add(id);
-            return id;
-        } catch (Exception e) {
-            log.warn("postHandRows failed", e);
-            return 0;
-        }
-    }
-
-    private long postHandWithImageRows(String content, byte[] image, String filename, ActionRow... rows) {
-        ThreadChannel t = thread();
-        if (t == null) return 0;
-        try {
-            long id = t.sendMessage(content)
-                    .addFiles(FileUpload.fromData(image, filename))
-                    .setComponents(rows)
-                    .complete().getIdLong();
-            handMessageIds.add(id);
-            return id;
-        } catch (Exception e) {
-            log.warn("postHandWithImageRows failed", e);
-            return 0;
-        }
-    }
-
     private void postRoom(String content) {
         ThreadChannel t = thread();
         if (t != null) {
@@ -997,7 +966,6 @@ public class GameSession {
             reminderTask = null;
         }
         actionSeq++;
-        pendingActorId = 0;
     }
 
     private void addToThread(long userId) {
@@ -1076,14 +1044,6 @@ public class GameSession {
             return "?";
         }
         return name.length() > 16 ? name.substring(0, 16) : name;
-    }
-
-    private String sanitize(String name) {
-        String s = name == null ? "" : name.replaceAll("[^a-zA-Z0-9]", "");
-        if (s.isEmpty()) {
-            s = "table";
-        }
-        return s.length() > 20 ? s.substring(0, 20) : s;
     }
 
     private static String str(long v) {
