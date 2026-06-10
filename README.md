@@ -10,19 +10,86 @@ is posted in the thread, and every player sees only their own hole cards via
 ## Features
 
 - Owner opens a room and sets **buy-in, small blind and big blind** (locked once the game starts).
+- **Multiple rooms per channel** — each game gets its own private thread named `game-<8-char-id>`.
 - Players join a lobby, owner starts → **seats are randomized**.
 - Full hand loop: blinds → deal hole cards → pre-flop / flop / turn / river betting → showdown → payout → cleanup → next hand.
 - **Dealer button rotates** each hand (heads-up handled correctly).
-- Correct **No-Limit betting rules**: bet ≥ 1 BB or all-in, proper **min-raise**, and the **incomplete all-in raise** rule (a short all-in does not re-open the betting for players who already acted).
+- Correct **No-Limit betting rules**: bet ≥ 1 BB or all-in, proper **min-raise**, and the **incomplete all-in raise** rule (a short all-in does not re-open the betting for players who already acted — Raise/All-in buttons are hidden when betting is closed).
 - **Turn lock**: only the player to act can act; anyone else is rejected.
-- **Side pots** computed automatically for any number of all-ins, with **uncalled bets refunded**.
-- **30-second timer** per turn with a **~10s reminder ping**: 1st timeout = auto-fold (warning), a **2nd *consecutive* timeout = kicked**. Acting in time clears the warning.
+- **Side pots** computed automatically for any number of all-ins, with **uncalled bets refunded**. Odd chips go to the first seat left of the dealer button.
+- **Card images** rendered via Graphics2D (headless) — board cards, hole cards, and card backs displayed as PNG attachments.
+- **Winner's best five highlighted** at showdown with yellow-bordered board cards.
+- **Inline table state** with every turn prompt — no more scrolling up to see the board:
+  ```
+  Hand #3   Flop
+  Board: 7♣ 5♥ A♠
+  Pot: 120    Blinds: 10/20
+  --------------------------------------
+   D Rogue            stack:940     bet:0      check
+  >  nimamas          stack:960     bet:0
+     pwn2ooown        stack:940     bet:0      call 20
+  --------------------------------------
+  To act: nimamas  Min bet: 20
+  ```
+- **Last action shown inline** next to each player in the table (check, call 20, raise 100, fold, etc.).
+- **30-second timer** per turn with a **~10s reminder ping**: 1st timeout = **auto-check** (if no bet) or **auto-fold** (if facing a bet) with warning; a **2nd *consecutive* timeout = kicked**.
+- **Show cards after hand** — 10-second window with buttons to publicly reveal one or both hole cards.
+- **View my cards** button on every turn prompt — privately shows your hole cards + current best hand with card image.
+- **Action buttons** with silent acknowledgment (no confirmation popup cluttering the chat).
 - Quit any time (auto-folds the current hand, no longer dealt in), join any time (seated next hand).
 - If the **owner leaves/is kicked**, the next player by join order becomes owner.
 - At least **2 players** required to start.
 - **Showdown reveals every remaining player's cards.**
 - Game state, players, stacks and a hand history are persisted to **SQLite**.
 - Owner can `end` (stop after the current hand) or `forceend` (stop immediately) from any state.
+- **SecureRandom** used for card and seat shuffling (cryptographic fairness).
+- Input validation: buy-in/blind/bet capped at 10M to prevent overflow.
+- Display names sanitized in code blocks to prevent formatting exploits.
+
+---
+
+## Architecture
+
+```mermaid
+graph TD
+    subgraph Discord Layer
+        PL[PokerListener<br/>Routes commands, buttons, modals]
+        GM[GameManager<br/>Room registry by thread ID]
+        GS[GameSession<br/>Hand flow, timers, rendering]
+        CR[CardRenderer<br/>Graphics2D card images]
+    end
+
+    subgraph Game Engine
+        PG[PokerGame<br/>Betting rules, streets, showdown]
+        PM[PotManager<br/>Main + side pots, refunds]
+        P[Player<br/>Stack, hole cards, state]
+    end
+
+    subgraph Poker Engine
+        HE[HandEvaluator<br/>Best 5-of-7]
+        HV[HandValue<br/>Category + tiebreakers]
+        D[Deck<br/>SecureRandom shuffle]
+        C[Card / Rank / Suit]
+    end
+
+    subgraph Persistence
+        DB[(SQLite<br/>Database)]
+    end
+
+    PL -->|slash cmds<br/>buttons| GS
+    PL -->|resolve by<br/>thread ID| GM
+    GS -->|game logic| PG
+    GS -->|card images| CR
+    GS -->|persist| DB
+    PG -->|evaluate hands| HE
+    PG -->|deal cards| D
+    PG -->|compute pots| PM
+    HE -->|rank hands| HV
+    HE --> C
+    D --> C
+    PG --> P
+    GM --> GS
+```
 
 ---
 
@@ -49,6 +116,7 @@ is posted in the thread, and every player sees only their own hole cards via
 2. Under **Scopes**, check **`bot`** and **`applications.commands`**.
 3. Under **Bot Permissions**, check:
    - Send Messages
+   - Attach Files
    - Embed Links
    - Read Message History
    - **Create Private Threads**
@@ -130,8 +198,15 @@ everything also has a slash-command equivalent.
 | `/call` · **Call** | Call the current bet |
 | `/bet amount:<n>` | Open the betting (≥ 1 big blind) |
 | `/raise amount:<n>` · **Raise** | Raise **to** a total amount |
-| `/allin` · **All-in** | Put all your chips in |
-| **🂠 View my cards** | Privately (ephemerally) see your hole cards |
+| `/allin` · **🔺 All-in** | Put all your chips in |
+| **🂠 View my cards** | Privately see your hole cards + current best hand |
+
+**After each hand:**
+
+| Button | Action |
+|---|---|
+| **Show card 1** / **Show card 2** | Publicly reveal one hole card (10s window) |
+| **Show both** | Publicly reveal both hole cards |
 
 A typical session:
 
@@ -152,15 +227,16 @@ src/main/java/com/poker/
 ├── Config.java                .env / environment loader
 ├── db/Database.java           SQLite persistence
 ├── engine/                    pure, unit-tested poker logic (no Discord)
-│   ├── Card, Rank, Suit, Deck
+│   ├── Card, Rank, Suit, Deck (SecureRandom)
 │   ├── HandEvaluator / HandValue / HandCategory   best 5-of-7 evaluation
 │   └── PotManager             main + side pots, uncalled-bet refunds
 ├── game/                      game state machine (no Discord)
 │   ├── PokerGame              blinds, betting rules, streets, showdown
 │   ├── Player, Street, ActionType, HandResult
 └── discord/                   Discord integration
-    ├── GameManager            room registry
+    ├── GameManager            room registry (by thread ID)
     ├── GameSession            one table: flow, threads, timers, rendering
+    ├── CardRenderer           Graphics2D card image generation
     └── PokerListener          routes slash commands / buttons / modals
 ```
 
@@ -171,8 +247,9 @@ JUnit tests in `src/test/java`.
 
 ## Design Notes & Assumptions
 
-- **One thread = one table** (a `GameSession`), which loops many hands until the owner ends it. **One active room per text channel** (different channels can each host their own table).
+- **One thread = one table** (a `GameSession`), which loops many hands until the owner ends it. Multiple rooms can exist in the same text channel — each gets a unique thread.
 - **Buy-in is fixed at open.** Busted players (stack 0) are **removed** from the room before the next hand; there is no re-buy.
-- **Timeout strikes count consecutively.** A `~10s` reminder is posted before the 30s deadline; the 1st timeout auto-folds (warning), a 2nd *consecutive* timeout kicks. Taking a valid action resets the warning.
-- **Per-hand cleanup keeps the result.** A few seconds after each hand, the play messages (state board, action prompts, reminders) are deleted, but the **hand's result summary is kept** in the thread as history.
+- **Timeout behavior:** 1st timeout auto-checks (if no bet to call) or auto-folds (if facing a bet). 2nd consecutive timeout kicks the player. Taking a valid action resets the warning.
+- **Per-hand cleanup keeps the result.** After each hand, play messages (table state, action prompts, reminders) are deleted, but the **result summary** (with winner highlight and show-cards buttons) is kept as thread history.
+- **Card rendering** uses `java.awt.Graphics2D` in headless mode — no display or custom emoji server setup needed. Winner's best five cards are highlighted with yellow borders at showdown.
 - A bot restart ends any in-progress hand; the database keeps room/player/stack and hand-history records.
