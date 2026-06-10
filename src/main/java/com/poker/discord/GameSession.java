@@ -677,24 +677,8 @@ public class GameSession {
     // ------------------------------------------------------------------
 
     private void postResults(HandResult r) {
-        // Post board card image if there are community cards
-        if (!r.board.isEmpty()) {
-            try {
-                byte[] boardImg = CardRenderer.renderCards(r.board);
-                ThreadChannel t = thread();
-                if (t != null) {
-                    t.sendMessage("🎴 **Board**")
-                            .addFiles(FileUpload.fromData(boardImg, "board.png"))
-                            .queue(s -> {}, e -> {});
-                }
-            } catch (Exception ignored) {}
-        }
-
         StringBuilder b = new StringBuilder();
         b.append(r.showdown ? "🎴 **Showdown**\n" : "🏆 **Hand result**\n");
-        if (!r.board.isEmpty()) {
-            b.append("Board: **").append(cards(r.board)).append("**\n\n");
-        }
         if (r.showdown) {
             for (HandResult.Reveal rv : r.reveals) {
                 b.append("• ").append(mention(rv.userId)).append(": ")
