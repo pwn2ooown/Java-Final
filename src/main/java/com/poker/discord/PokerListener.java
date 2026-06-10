@@ -79,15 +79,9 @@ public class PokerListener extends ListenerAdapter {
                 event.reply(error).setEphemeral(true).queue();
                 return;
             }
-            if (manager.hasRoomInChannel(channelId)) {
-                event.reply("There is already a poker room in this channel. Close it with `/poker forceend` first.")
-                        .setEphemeral(true).queue();
-                return;
-            }
             event.deferReply(true).queue();
             GameSession session = new GameSession(manager, event.getGuild().getIdLong(),
                     channelId, userId, userName, sb, bb, buyin);
-            manager.registerParent(channelId, session);
             session.init(event.getHook());
             return;
         }
@@ -142,9 +136,34 @@ public class PokerListener extends ListenerAdapter {
         long channelId = event.getChannel().getIdLong();
         long userId = event.getUser().getIdLong();
         String userName = event.getUser().getEffectiveName();
+        log.info("Button '{}' from {} ({}) channel={}", id, userName, userId, channelId);
+
+        // Room buttons (posted in the parent channel) carry the thread ID.
+        if (id.startsWith("room:join:") || id.startsWith("room:start:")) {
+            String[] parts = id.split(":", 3);
+            long threadId;
+            try {
+                threadId = Long.parseLong(parts[2]);
+            } catch (NumberFormatException | ArrayIndexOutOfBoundsException e) {
+                event.reply("Invalid button — this room may no longer exist.").setEphemeral(true).queue();
+                return;
+            }
+            GameSession session = manager.resolve(threadId);
+            if (session == null) {
+                event.reply("This poker room has ended.").setEphemeral(true).queue();
+                return;
+            }
+            event.deferReply(true).queue();
+            if (parts[1].equals("join")) {
+                session.onJoin(userId, userName, event.getHook());
+            } else {
+                session.onStart(userId, event.getHook());
+            }
+            return;
+        }
+
+        // In-thread buttons resolve by the thread channel.
         GameSession session = manager.resolve(channelId);
-        log.info("Button '{}' from {} ({}) channel={} sessionFound={}",
-                id, userName, userId, channelId, session != null);
 
         // The raise button opens a modal — it must be the initial response (no defer).
         if (id.equals("act:raise")) {
@@ -168,14 +187,6 @@ public class PokerListener extends ListenerAdapter {
             return;
         }
         switch (id) {
-            case "room:join" -> {
-                event.deferReply(true).queue();
-                session.onJoin(userId, userName, event.getHook());
-            }
-            case "room:start" -> {
-                event.deferReply(true).queue();
-                session.onStart(userId, event.getHook());
-            }
             case "act:fold" -> {
                 event.deferReply(true).queue();
                 session.onAction(userId, ActionType.FOLD, 0, event.getHook());

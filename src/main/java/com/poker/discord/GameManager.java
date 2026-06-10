@@ -7,9 +7,8 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Registry of active poker rooms. A room is reachable both by its lobby (parent)
- * channel — where players run {@code /poker join} — and by its private thread,
- * where the actual game and betting happen.
+ * Registry of active poker rooms. Multiple rooms can exist in the same parent
+ * channel — each is keyed by its private thread ID.
  */
 public class GameManager {
 
@@ -17,7 +16,6 @@ public class GameManager {
     private JDA jda;
 
     private final Map<Long, GameSession> byThread = new ConcurrentHashMap<>();
-    private final Map<Long, GameSession> byParent = new ConcurrentHashMap<>();
 
     public GameManager(Database db) {
         this.db = db;
@@ -35,18 +33,9 @@ public class GameManager {
         return db;
     }
 
-    /** Finds the session for an interaction in {@code channelId} (thread or lobby). */
+    /** Finds the session for an interaction in {@code channelId} (must be the thread). */
     public GameSession resolve(long channelId) {
-        GameSession s = byThread.get(channelId);
-        return (s != null) ? s : byParent.get(channelId);
-    }
-
-    public boolean hasRoomInChannel(long parentChannelId) {
-        return byParent.containsKey(parentChannelId);
-    }
-
-    public void registerParent(long parentChannelId, GameSession session) {
-        byParent.put(parentChannelId, session);
+        return byThread.get(channelId);
     }
 
     public void registerThread(long threadId, GameSession session) {
@@ -54,7 +43,6 @@ public class GameManager {
     }
 
     public void unregister(GameSession session) {
-        byParent.remove(session.parentChannelId());
         if (session.threadId() != 0) {
             byThread.remove(session.threadId());
         }

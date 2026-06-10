@@ -18,6 +18,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Random;
+import java.util.UUID;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
@@ -244,24 +245,25 @@ public class GameSession {
             Player owner = game.addPlayer(ownerId, ownerName, ++joinCounter);
             manager.db().upsertPlayer(roomDbId, str(ownerId), ownerName, owner.joinOrder, owner.stack);
 
-            ThreadChannel thread = parent.createThreadChannel("poker-" + sanitize(ownerName), true).complete();
+            String roomCode = UUID.randomUUID().toString().substring(0, 8);
+            ThreadChannel thread = parent.createThreadChannel("game-" + roomCode, true).complete();
             threadId = thread.getIdLong();
-            log.info("Created private thread {} for room (parent {})", threadId, parentChannelId);
+            log.info("Created private thread {} (game-{}) for room (parent {})", threadId, roomCode, parentChannelId);
             manager.registerThread(threadId, this);
             manager.db().setThread(roomDbId, str(threadId));
 
             thread.addThreadMemberById(ownerId).queue(s -> {
             }, e -> {
             });
-            thread.sendMessage("👋 Welcome " + mention(ownerId) + "! This private thread is your table. "
-                    + "Other players join from the buttons in <#" + parentChannelId + "> or with `/poker join`.").queue();
+            thread.sendMessage("👋 Welcome " + mention(ownerId) + "! This private thread is your table.\n"
+                    + "Other players join from the buttons in <#" + parentChannelId + "> or with `/poker join` in this thread.").queue();
 
-            parent.sendMessage("🃏 **Poker table opened by " + mention(ownerId) + "**\n"
+            parent.sendMessage("🃏 **Poker table opened by " + mention(ownerId) + "** → <#" + threadId + ">\n"
                             + "Buy-in **" + buyIn + "** • Blinds **" + sb + "/" + bb + "**\n"
                             + "Press **Join** to take a seat — the owner presses **Start** when everyone is in.")
                     .setComponents(ActionRow.of(
-                            Button.success("room:join", "Join"),
-                            Button.primary("room:start", "Start")))
+                            Button.success("room:join:" + threadId, "Join"),
+                            Button.primary("room:start:" + threadId, "Start")))
                     .queue();
 
             ephem(hook, "✅ Table created: <#" + threadId + ">");
