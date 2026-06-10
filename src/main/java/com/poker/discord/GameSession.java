@@ -222,18 +222,14 @@ public class GameSession {
         });
     }
 
-    public void onShowCards(long clickerId, long targetUserId, String choice, InteractionHook hook) {
+    public void onShowCards(long userId, String choice, InteractionHook hook) {
         exec.execute(() -> {
-            if (clickerId != targetUserId) {
-                ephem(hook, "Those aren't your cards.");
-                return;
-            }
-            List<Card> hole = lastHoleCards.get(targetUserId);
+            List<Card> hole = lastHoleCards.get(userId);
             if (hole == null || hole.isEmpty()) {
                 ephem(hook, "You have no cards to show.");
                 return;
             }
-            if (!shownCards.add(targetUserId)) {
+            if (!shownCards.add(userId)) {
                 ephem(hook, "You already showed your cards.");
                 return;
             }
@@ -248,13 +244,13 @@ public class GameSession {
                 byte[] img = CardRenderer.renderCards(toShow);
                 ThreadChannel t = thread();
                 if (t != null) {
-                    t.sendMessage("🃏 " + mention(targetUserId) + " shows: **" + label + "**")
+                    t.sendMessage("🃏 " + mention(userId) + " shows: **" + label + "**")
                             .addFiles(FileUpload.fromData(img, "shown.png"))
                             .queue(s -> {}, e -> {});
                 }
                 ephem(hook, "✅ Cards shown!");
             } catch (Exception e) {
-                postRoom("🃏 " + mention(targetUserId) + " shows: **" + label + "**");
+                postRoom("🃏 " + mention(userId) + " shows: **" + label + "**");
                 ephem(hook, "✅ Cards shown!");
             }
         });
@@ -773,24 +769,12 @@ public class GameSession {
     }
 
     private void postShowCardButtons() {
-        List<ActionRow> rows = new ArrayList<>();
-        for (Map.Entry<Long, List<Card>> entry : lastHoleCards.entrySet()) {
-            long uid = entry.getKey();
-            if (shownCards.contains(uid)) continue;
-            List<Card> hole = entry.getValue();
-            List<Button> btns = new ArrayList<>();
-            btns.add(Button.primary("show:" + uid + ":card1", "Show " + hole.get(0).shortName()));
-            if (hole.size() > 1) {
-                btns.add(Button.primary("show:" + uid + ":card2", "Show " + hole.get(1).shortName()));
-            }
-            btns.add(Button.success("show:" + uid + ":both", "Show both"));
-            rows.add(ActionRow.of(btns));
-            if (rows.size() >= 5) break;
-        }
-        if (!rows.isEmpty()) {
-            String msg = "🃏 Show your cards? (10s)";
-            postKeptRows(msg, rows.toArray(new ActionRow[0]));
-        }
+        boolean anyCanShow = lastHoleCards.keySet().stream().anyMatch(uid -> !shownCards.contains(uid));
+        if (!anyCanShow) return;
+        postKeptRows("🃏 Show your cards? (10s)", ActionRow.of(
+                Button.primary("show:card1", "Show card 1"),
+                Button.primary("show:card2", "Show card 2"),
+                Button.success("show:both", "Show both")));
     }
 
     private void postStreetAnnouncement() {
