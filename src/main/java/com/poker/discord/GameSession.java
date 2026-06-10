@@ -1,6 +1,8 @@
 package com.poker.discord;
 
 import com.poker.engine.Card;
+import com.poker.engine.HandEvaluator;
+import com.poker.engine.HandValue;
 import com.poker.game.ActionType;
 import com.poker.game.HandResult;
 import com.poker.game.InvalidActionException;
@@ -11,6 +13,7 @@ import net.dv8tion.jda.api.entities.channel.concrete.ThreadChannel;
 import net.dv8tion.jda.api.interactions.InteractionHook;
 import net.dv8tion.jda.api.interactions.components.ActionRow;
 import net.dv8tion.jda.api.interactions.components.buttons.Button;
+import net.dv8tion.jda.api.utils.FileUpload;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -60,7 +63,6 @@ public class GameSession {
     private volatile long threadId;
     private volatile long ownerId;
 
-    private long stateMessageId;
     private long actionMessageId;
     private long pendingActorId;
     private int actionSeq;
@@ -166,7 +168,17 @@ public class GameSession {
     public void onStatus(long userId, InteractionHook hook) {
         exec.execute(() -> {
             if (started && game.handInProgress()) {
-                ephem(hook, tableText());
+                String status = tableText();
+                if (!game.board().isEmpty()) {
+                    try {
+                        byte[] img = CardRenderer.renderCards(game.board());
+                        hook.sendMessage(status)
+                                .addFiles(FileUpload.fromData(img, "board.png"))
+                                .queue(s -> {}, e -> {});
+                        return;
+                    } catch (Exception ignored) {}
+                }
+                ephem(hook, status);
             } else {
                 ephem(hook, "Room is waiting. Seated players: " + game.seats().size()
                         + ". Owner: " + mention(ownerId) + ". Use `/poker start` to begin.");
@@ -182,7 +194,25 @@ public class GameSession {
             } else if (p.hole.isEmpty()) {
                 ephem(hook, "You have no cards right now.");
             } else {
-                ephem(hook, "🂠 Your hole cards: **" + cards(p.hole) + "**");
+                StringBuilder sb = new StringBuilder();
+                sb.append("🂠 Your hole cards: **").append(cards(p.hole)).append("**");
+                if (!game.board().isEmpty()) {
+                    List<Card> all = new ArrayList<>(game.board());
+                    all.addAll(p.hole);
+                    if (all.size() >= 5) {
+                        HandValue hv = HandEvaluator.evaluate(all);
+                        sb.append("\n🃏 Current best hand: **").append(hv.describe())
+                          .append("** (").append(hv.bestFiveStr()).append(")");
+                    }
+                }
+                try {
+                    byte[] holeImg = CardRenderer.renderCards(p.hole);
+                    hook.sendMessage(sb.toString())
+                            .addFiles(FileUpload.fromData(holeImg, "hole.png"))
+                            .queue(s -> {}, e -> {});
+                } catch (Exception e) {
+                    ephem(hook, sb.toString());
+                }
             }
         });
     }
@@ -372,16 +402,14 @@ public class GameSession {
         }
         manager.db().setState(roomDbId, "PLAYING");
         handMessageIds.clear();
-        stateMessageId = 0;
         actionMessageId = 0;
 
         log.info("Hand #{} starting: {} players, button={}",
                 game.handNumber(), game.seats().size(), game.buttonUserId());
         postHand("🃏 **Hand #" + game.handNumber() + "** — Dealer button: " + mention(game.buttonUserId())
                 + " • Blinds **" + sb + "/" + bb + "**");
-        postHand("Tap to privately check your hole cards (only you can see them):",
+        postHand("Tap to privately view your hole cards and current best hand:",
                 ActionRow.of(Button.primary("act:cards", "🂠 View my cards")));
-        postTableState();
         proceed();
     }
 
@@ -407,7 +435,7 @@ public class GameSession {
                 game.dealNextStreet();
                 log.debug("Hand #{}: dealt {} — board: {} (ableToAct={})",
                         game.handNumber(), game.street(), cardsPlain(game.board()), ableNow);
-                postTableState();
+                postStreetAnnouncement();
                 if (ableNow < 2) {
                     log.debug("Hand #{}: all-in run-out from {} to RIVER", game.handNumber(), game.street());
                     while (game.street() != com.poker.game.Street.RIVER) {
@@ -415,7 +443,7 @@ public class GameSession {
                         log.debug("Hand #{}: dealt {} — board: {}",
                                 game.handNumber(), game.street(), cardsPlain(game.board()));
                     }
-                    postTableState();
+                    postStreetAnnouncement();
                     finishHand(true);
                     return;
                 }
@@ -436,7 +464,7 @@ public class GameSession {
 
         long toCall = game.callAmountFor(p);
         long allInTo = p.streetCommitted + p.stack;
-        boolean canRaise = p.stack > toCall; // chips beyond the call -> a (re)raise/all-in raise is possible
+        boolean canRaise = p.stack > toCall;
 
         String betLine;
         if (toCall == 0) {
@@ -444,35 +472,46 @@ public class GameSession {
         } else if (canRaise) {
             betLine = "To call: **" + toCall + "** • Min raise to: **" + game.minRaiseTo() + "**";
         } else {
-            betLine = "To call: **" + toCall + "** (all-in) — you can only call or fold";
+            betLine = "To call: **" + toCall + "** (all-in)";
         }
-        String content = mention(p.userId) + " — **your turn**.\n"
-                + "Your stack: **" + p.stack + "** • Pot: **" + game.totalPot() + "**\n"
-                + betLine + " • You have 30s to act.";
 
-        // Context-specific buttons, modelled on PokerGPT's call / check / all-in views:
-        // only the actions that are actually legal right now are shown.
+        StringBuilder content = new StringBuilder();
+        content.append(tableText()).append("\n");
+        content.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+        content.append("🎯 ").append(mention(p.userId)).append(" — **YOUR TURN**\n");
+        content.append("Stack: **").append(p.stack).append("** • Pot: **")
+                .append(game.totalPot()).append("** • ").append(betLine).append("\n");
+        content.append("⏰ 30s to act");
+
         List<Button> buttons = new ArrayList<>();
         if (toCall == 0) {
-            // Nothing to call -> Check / Bet / All-in / Fold
             buttons.add(Button.primary("act:check", "Check"));
             buttons.add(Button.success("act:raise", "Bet"));
             buttons.add(Button.success("act:allin", "All-in " + allInTo));
             buttons.add(Button.danger("act:fold", "Fold"));
         } else if (canRaise) {
-            // Facing a bet, can raise -> Call / Raise / All-in / Fold
             buttons.add(Button.primary("act:call", "Call " + toCall));
             buttons.add(Button.success("act:raise", "Raise"));
             buttons.add(Button.success("act:allin", "All-in " + allInTo));
             buttons.add(Button.danger("act:fold", "Fold"));
         } else {
-            // Calling uses your whole stack -> Call all-in / Fold
             buttons.add(Button.primary("act:call",
                     toCall >= p.stack ? "Call all-in " + p.stack : "Call " + toCall));
             buttons.add(Button.danger("act:fold", "Fold"));
         }
 
-        actionMessageId = postHand(content, ActionRow.of(buttons));
+        if (!game.board().isEmpty()) {
+            try {
+                byte[] boardImg = CardRenderer.renderCards(game.board());
+                actionMessageId = postHandWithImage(content.toString(), boardImg, "board.png",
+                        ActionRow.of(buttons));
+            } catch (Exception e) {
+                log.warn("Card image rendering failed, using text fallback", e);
+                actionMessageId = postHand(content.toString(), ActionRow.of(buttons));
+            }
+        } else {
+            actionMessageId = postHand(content.toString(), ActionRow.of(buttons));
+        }
 
         int token = ++actionSeq;
         reminderTask = exec.schedule(() -> onReminder(token),
@@ -531,7 +570,6 @@ public class GameSession {
         for (HandResult.PotAward a : result.awards) {
             log.info("  {} ({}): winners={} desc={}", a.label, a.amount, a.winners, a.handDesc);
         }
-        postTableState();
         postResults(result);
         persist(result);
 
@@ -640,6 +678,19 @@ public class GameSession {
     // ------------------------------------------------------------------
 
     private void postResults(HandResult r) {
+        // Post board card image if there are community cards
+        if (!r.board.isEmpty()) {
+            try {
+                byte[] boardImg = CardRenderer.renderCards(r.board);
+                ThreadChannel t = thread();
+                if (t != null) {
+                    t.sendMessage("🎴 **Board**")
+                            .addFiles(FileUpload.fromData(boardImg, "board.png"))
+                            .queue(s -> {}, e -> {});
+                }
+            } catch (Exception ignored) {}
+        }
+
         StringBuilder b = new StringBuilder();
         b.append(r.showdown ? "🎴 **Showdown**\n" : "🏆 **Hand result**\n");
         if (!r.board.isEmpty()) {
@@ -666,28 +717,18 @@ public class GameSession {
                     b.append("↩️ Returned ").append(amt).append(" (uncalled) to ").append(mention(uid)).append("\n"));
         }
         b.append("\n").append(standingsBlock());
-        // Kept (not tracked for cleanup) so each hand's result stays in the thread as history.
         postKept(b.toString());
     }
 
-    private void postTableState() {
-        ThreadChannel t = thread();
-        if (t == null) {
-            return;
-        }
-        String txt = tableText();
-        if (stateMessageId == 0) {
-            try {
-                long id = t.sendMessage(txt).complete().getIdLong();
-                stateMessageId = id;
-                handMessageIds.add(id);
-            } catch (Exception e) {
-                log.warn("postTableState failed", e);
-            }
-        } else {
-            t.editMessageById(str(stateMessageId), txt).queue(s -> {
-            }, e -> {
-            });
+    private void postStreetAnnouncement() {
+        if (game.board().isEmpty()) return;
+        try {
+            byte[] img = CardRenderer.renderCards(game.board());
+            String label = "🃏 **— " + game.street().display().toUpperCase() + " —**";
+            postHandWithImage(label, img, "board.png", null);
+        } catch (Exception e) {
+            postHand("🃏 **— " + game.street().display().toUpperCase()
+                    + " —**  " + cardsPlain(game.board()));
         }
     }
 
@@ -752,6 +793,26 @@ public class GameSession {
         }
     }
 
+    private long postHandWithImage(String content, byte[] image, String filename, ActionRow row) {
+        ThreadChannel t = thread();
+        if (t == null) {
+            return 0;
+        }
+        try {
+            var action = t.sendMessage(content)
+                    .addFiles(FileUpload.fromData(image, filename));
+            if (row != null) {
+                action = action.setComponents(row);
+            }
+            long id = action.complete().getIdLong();
+            handMessageIds.add(id);
+            return id;
+        } catch (Exception e) {
+            log.warn("postHandWithImage failed", e);
+            return 0;
+        }
+    }
+
     private void postRoom(String content) {
         ThreadChannel t = thread();
         if (t != null) {
@@ -793,7 +854,6 @@ public class GameSession {
             }
         }
         handMessageIds.clear();
-        stateMessageId = 0;
         actionMessageId = 0;
     }
 

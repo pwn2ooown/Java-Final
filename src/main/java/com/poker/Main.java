@@ -21,6 +21,7 @@ public class Main {
     private static final Logger log = LoggerFactory.getLogger(Main.class);
 
     public static void main(String[] args) throws InterruptedException {
+        System.setProperty("java.awt.headless", "true");
         Config cfg = new Config();
         String token = cfg.require("DISCORD_TOKEN");
         String dbPath = cfg.getOrDefault("DB_PATH", "poker.db");

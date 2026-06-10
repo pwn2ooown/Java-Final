@@ -5,7 +5,9 @@ import org.junit.jupiter.api.Test;
 import java.util.Random;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class PokerGameTest {
 
@@ -111,6 +113,50 @@ class PokerGameTest {
         assertEquals(1000, stackOf(g, 100));
         assertEquals(990, stackOf(g, 101));  // lost the small blind
         assertEquals(1010, stackOf(g, 102)); // won the small blind
+    }
+
+    @Test
+    void checkAroundAdvancesStreet() {
+        PokerGame g = newGame(1000, 10, 20, 100, 101, 102);
+        g.startHand();
+        // Pre-flop: UTG calls, SB calls, BB checks
+        g.applyAction(g.currentActor().userId, ActionType.CALL, 0);
+        g.applyAction(g.currentActor().userId, ActionType.CALL, 0);
+        g.applyAction(g.currentActor().userId, ActionType.CHECK, 0);
+        assertTrue(g.bettingRoundComplete());
+
+        g.dealNextStreet();
+        assertEquals(Street.FLOP, g.street());
+        assertEquals(3, g.board().size());
+        assertFalse(g.bettingRoundComplete());
+
+        // Flop: all three check
+        g.applyAction(g.currentActor().userId, ActionType.CHECK, 0);
+        assertFalse(g.bettingRoundComplete());
+        g.applyAction(g.currentActor().userId, ActionType.CHECK, 0);
+        assertFalse(g.bettingRoundComplete());
+        g.applyAction(g.currentActor().userId, ActionType.CHECK, 0);
+        assertTrue(g.bettingRoundComplete());
+
+        g.dealNextStreet();
+        assertEquals(Street.TURN, g.street());
+        assertEquals(4, g.board().size());
+
+        // Turn: all three check
+        g.applyAction(g.currentActor().userId, ActionType.CHECK, 0);
+        g.applyAction(g.currentActor().userId, ActionType.CHECK, 0);
+        g.applyAction(g.currentActor().userId, ActionType.CHECK, 0);
+        assertTrue(g.bettingRoundComplete());
+
+        g.dealNextStreet();
+        assertEquals(Street.RIVER, g.street());
+        assertEquals(5, g.board().size());
+
+        // River: all three check → round complete, showdown
+        g.applyAction(g.currentActor().userId, ActionType.CHECK, 0);
+        g.applyAction(g.currentActor().userId, ActionType.CHECK, 0);
+        g.applyAction(g.currentActor().userId, ActionType.CHECK, 0);
+        assertTrue(g.bettingRoundComplete());
     }
 
     @Test
