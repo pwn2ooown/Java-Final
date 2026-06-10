@@ -6,6 +6,7 @@ import java.util.Collections;
 import java.util.Deque;
 import java.util.List;
 import java.util.Random;
+import java.security.SecureRandom;
 
 /** A standard 52-card deck, shuffled on construction. */
 public class Deck {
@@ -13,7 +14,7 @@ public class Deck {
     private final Deque<Card> cards = new ArrayDeque<>(52);
 
     public Deck() {
-        this(new Random());
+        this(new SecureRandom());
     }
 
     public Deck(Random rng) {

@@ -234,6 +234,10 @@ public class PokerGame {
         return p.streetCommitted + p.stack;
     }
 
+    public boolean canRaise(Player p) {
+        return p.stack > callAmountFor(p) && !actedSinceFullRaise.contains(p.userId);
+    }
+
     public long totalPot() {
         long sum = 0;
         for (Player p : players) {
@@ -583,8 +587,9 @@ public class PokerGame {
 
     private List<Integer> orderFromButton(List<Integer> seats) {
         int n = players.size();
+        int leftOfButton = (buttonPos + 1) % n;
         List<Integer> copy = new ArrayList<>(seats);
-        copy.sort((a, b) -> Integer.compare((a - buttonPos + n) % n, (b - buttonPos + n) % n));
+        copy.sort((a, b) -> Integer.compare((a - leftOfButton + n) % n, (b - leftOfButton + n) % n));
         return copy;
     }
 }

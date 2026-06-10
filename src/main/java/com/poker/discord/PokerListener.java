@@ -239,6 +239,10 @@ public class PokerListener extends ListenerAdapter {
             event.reply("❌ '" + raw + "' is not a whole number.").setEphemeral(true).queue();
             return;
         }
+        if (amount <= 0 || amount > MAX_CHIPS) {
+            event.reply("❌ Amount must be between 1 and " + MAX_CHIPS + ".").setEphemeral(true).queue();
+            return;
+        }
         event.deferReply(true).queue();
         // onAction normalizes BET vs RAISE based on whether there is already a bet.
         session.onAction(event.getUser().getIdLong(), ActionType.RAISE, amount, event.getHook());
@@ -249,9 +253,14 @@ public class PokerListener extends ListenerAdapter {
         return opt == null ? 0 : opt.getAsLong();
     }
 
+    private static final long MAX_CHIPS = 10_000_000;
+
     private static String validateOpen(long buyin, long sb, long bb) {
         if (sb <= 0 || bb <= 0) {
             return "Blinds must be positive.";
+        }
+        if (sb > MAX_CHIPS || bb > MAX_CHIPS || buyin > MAX_CHIPS) {
+            return "Values cannot exceed " + MAX_CHIPS + ".";
         }
         if (sb > bb) {
             return "The small blind cannot be larger than the big blind.";

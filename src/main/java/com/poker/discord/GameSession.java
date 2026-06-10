@@ -21,7 +21,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
-import java.util.Random;
+import java.security.SecureRandom;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -89,7 +89,7 @@ public class GameSession {
         this.sb = sb;
         this.bb = bb;
         this.buyIn = buyIn;
-        this.game = new PokerGame(sb, bb, buyIn, new Random());
+        this.game = new PokerGame(sb, bb, buyIn, new SecureRandom());
         this.roomDbId = manager.db().createRoom(str(guildId), str(parentChannelId), str(ownerId), sb, bb, buyIn);
     }
 
@@ -502,7 +502,7 @@ public class GameSession {
 
         long toCall = game.callAmountFor(p);
         long allInTo = p.streetCommitted + p.stack;
-        boolean canRaise = p.stack > toCall;
+        boolean canRaise = game.canRaise(p);
 
         StringBuilder content = new StringBuilder();
         content.append(tableText()).append("\n");
@@ -511,8 +511,10 @@ public class GameSession {
         List<Button> buttons = new ArrayList<>();
         if (toCall == 0) {
             buttons.add(Button.primary("act:check", "Check"));
-            buttons.add(Button.success("act:raise", "Bet"));
-            buttons.add(Button.success("act:allin", "🔺 All-in " + allInTo));
+            if (canRaise) {
+                buttons.add(Button.success("act:raise", "Bet"));
+                buttons.add(Button.success("act:allin", "🔺 All-in " + allInTo));
+            }
             buttons.add(Button.danger("act:fold", "Fold"));
         } else if (canRaise) {
             buttons.add(Button.primary("act:call", "Call " + toCall));
@@ -810,14 +812,18 @@ public class GameSession {
         }
         if (cur != null) {
             long toCall = game.callAmountFor(cur);
+            boolean canRaise = game.canRaise(cur);
             b.append("--------------------------------------\n");
-            if (toCall == 0) {
-                b.append("To act: ").append(cur.name).append("  Min bet: ").append(bb).append("\n");
-            } else if (cur.stack > toCall) {
-                b.append("To act: ").append(cur.name).append("  Call: ").append(toCall)
+            if (toCall == 0 && canRaise) {
+                b.append("To act: ").append(trunc(cur.name)).append("  Min bet: ").append(bb).append("\n");
+            } else if (toCall == 0) {
+                b.append("To act: ").append(trunc(cur.name)).append("  Check only\n");
+            } else if (canRaise) {
+                b.append("To act: ").append(trunc(cur.name)).append("  Call: ").append(toCall)
                         .append("  Min raise: ").append(game.minRaiseTo()).append("\n");
             } else {
-                b.append("To act: ").append(cur.name).append("  Call: ").append(toCall).append(" (all-in)\n");
+                b.append("To act: ").append(trunc(cur.name)).append("  Call: ").append(toCall)
+                        .append(toCall >= cur.stack ? " (all-in)" : " (call or fold)").append("\n");
             }
         }
         b.append("```");
@@ -1011,7 +1017,9 @@ public class GameSession {
         if (name == null) {
             return "?";
         }
-        return name.length() > 16 ? name.substring(0, 16) : name;
+        String safe = name.replace("`", "").replace("@", "");
+        if (safe.isBlank()) safe = "player";
+        return safe.length() > 16 ? safe.substring(0, 16) : safe;
     }
 
     private static String str(long v) {
