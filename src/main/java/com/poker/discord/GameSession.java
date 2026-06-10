@@ -44,7 +44,7 @@ public class GameSession {
     private static final Logger log = LoggerFactory.getLogger(GameSession.class);
     private static final long ACTION_TIMEOUT_SECONDS = 30;
     private static final long REMINDER_BEFORE_SECONDS = 10;
-    private static final long RESULT_LINGER_SECONDS = 8;
+    private static final long RESULT_LINGER_SECONDS = 10;
 
     private final GameManager manager;
     private final long guildId;
@@ -222,44 +222,39 @@ public class GameSession {
         });
     }
 
-    public void onShowCards(long userId, String choice, InteractionHook hook) {
+    public void onShowCards(long clickerId, long targetUserId, String choice, InteractionHook hook) {
         exec.execute(() -> {
-            List<Card> hole = lastHoleCards.get(userId);
+            if (clickerId != targetUserId) {
+                ephem(hook, "Those aren't your cards.");
+                return;
+            }
+            List<Card> hole = lastHoleCards.get(targetUserId);
             if (hole == null || hole.isEmpty()) {
                 ephem(hook, "You have no cards to show.");
                 return;
             }
-            if (!shownCards.add(userId)) {
+            if (!shownCards.add(targetUserId)) {
                 ephem(hook, "You already showed your cards.");
                 return;
             }
             List<Card> toShow;
-            String label;
             switch (choice) {
-                case "card1" -> {
-                    toShow = List.of(hole.get(0));
-                    label = cards(toShow);
-                }
-                case "card2" -> {
-                    toShow = hole.size() > 1 ? List.of(hole.get(1)) : List.of(hole.get(0));
-                    label = cards(toShow);
-                }
-                default -> {
-                    toShow = hole;
-                    label = cards(toShow);
-                }
+                case "card1" -> toShow = List.of(hole.get(0));
+                case "card2" -> toShow = hole.size() > 1 ? List.of(hole.get(1)) : List.of(hole.get(0));
+                default -> toShow = hole;
             }
+            String label = cards(toShow);
             try {
                 byte[] img = CardRenderer.renderCards(toShow);
                 ThreadChannel t = thread();
                 if (t != null) {
-                    t.sendMessage("🃏 " + mention(userId) + " shows: **" + label + "**")
+                    t.sendMessage("🃏 " + mention(targetUserId) + " shows: **" + label + "**")
                             .addFiles(FileUpload.fromData(img, "shown.png"))
                             .queue(s -> {}, e -> {});
                 }
                 ephem(hook, "✅ Cards shown!");
             } catch (Exception e) {
-                postRoom("🃏 " + mention(userId) + " shows: **" + label + "**");
+                postRoom("🃏 " + mention(targetUserId) + " shows: **" + label + "**");
                 ephem(hook, "✅ Cards shown!");
             }
         });
@@ -758,15 +753,53 @@ public class GameSession {
         }
         b.append("\n").append(standingsBlock());
 
-        boolean anyCanShow = lastHoleCards.keySet().stream().anyMatch(uid -> !shownCards.contains(uid));
-        if (anyCanShow) {
-            List<Button> showButtons = new ArrayList<>();
-            showButtons.add(Button.primary("show:card1", "Show card 1"));
-            showButtons.add(Button.primary("show:card2", "Show card 2"));
-            showButtons.add(Button.success("show:both", "Show both"));
-            postKeptRows(b.toString(), ActionRow.of(showButtons));
+        List<Card> winnerBestFive = findWinnerBestFive(r);
+        if (r.showdown && !r.board.isEmpty() && !winnerBestFive.isEmpty()) {
+            try {
+                List<Card> allCards = new ArrayList<>(r.board);
+                byte[] img = CardRenderer.renderCardsHighlighted(allCards, winnerBestFive);
+                postKeptWithImage(b.toString(), img, "board.png");
+            } catch (Exception e) {
+                postKept(b.toString());
+            }
         } else {
             postKept(b.toString());
+        }
+
+        postShowCardButtons();
+    }
+
+    private List<Card> findWinnerBestFive(HandResult r) {
+        if (!r.showdown || r.awards.isEmpty()) return List.of();
+        List<Long> winners = r.awards.get(0).winners;
+        if (winners.isEmpty()) return List.of();
+        long winnerId = winners.get(0);
+        for (HandResult.Reveal rv : r.reveals) {
+            if (rv.userId == winnerId && rv.bestFive != null) {
+                return rv.bestFive;
+            }
+        }
+        return List.of();
+    }
+
+    private void postShowCardButtons() {
+        List<ActionRow> rows = new ArrayList<>();
+        for (Map.Entry<Long, List<Card>> entry : lastHoleCards.entrySet()) {
+            long uid = entry.getKey();
+            if (shownCards.contains(uid)) continue;
+            List<Card> hole = entry.getValue();
+            List<Button> btns = new ArrayList<>();
+            btns.add(Button.primary("show:" + uid + ":card1", "Show " + hole.get(0).shortName()));
+            if (hole.size() > 1) {
+                btns.add(Button.primary("show:" + uid + ":card2", "Show " + hole.get(1).shortName()));
+            }
+            btns.add(Button.success("show:" + uid + ":both", "Show both"));
+            rows.add(ActionRow.of(btns));
+            if (rows.size() >= 5) break;
+        }
+        if (!rows.isEmpty()) {
+            String msg = "🃏 Show your cards? (10s)";
+            postKeptRows(msg, rows.toArray(new ActionRow[0]));
         }
     }
 
@@ -908,6 +941,15 @@ public class GameSession {
             t.sendMessage(content).queue(s -> {
             }, e -> {
             });
+        }
+    }
+
+    private void postKeptWithImage(String content, byte[] image, String filename) {
+        ThreadChannel t = thread();
+        if (t != null) {
+            t.sendMessage(content)
+                    .addFiles(FileUpload.fromData(image, filename))
+                    .queue(s -> {}, e -> {});
         }
     }
 
