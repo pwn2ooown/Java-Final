@@ -739,20 +739,32 @@ public class GameSession {
         }
         b.append("\n").append(standingsBlock());
 
-        List<Card> winnerBestFive = findWinnerBestFive(r);
-        if (r.showdown && !r.board.isEmpty() && !winnerBestFive.isEmpty()) {
-            try {
-                List<Card> allCards = new ArrayList<>(r.board);
-                byte[] img = CardRenderer.renderCardsHighlighted(allCards, winnerBestFive);
-                postKeptWithImage(b.toString(), img, "board.png");
-            } catch (Exception e) {
-                postKept(b.toString());
-            }
-        } else {
-            postKept(b.toString());
+        boolean anyCanShow = lastHoleCards.keySet().stream().anyMatch(uid -> !shownCards.contains(uid));
+        if (anyCanShow) {
+            b.append("\n🃏 Show your cards? (10s)");
         }
+        ActionRow showRow = anyCanShow ? ActionRow.of(
+                Button.primary("show:card1", "Show card 1"),
+                Button.primary("show:card2", "Show card 2"),
+                Button.success("show:both", "Show both")) : null;
 
-        postShowCardButtons();
+        List<Card> winnerBestFive = findWinnerBestFive(r);
+        ThreadChannel t = thread();
+        if (t == null) return;
+
+        try {
+            var action = t.sendMessage(b.toString());
+            if (r.showdown && !r.board.isEmpty() && !winnerBestFive.isEmpty()) {
+                byte[] img = CardRenderer.renderCardsHighlighted(new ArrayList<>(r.board), winnerBestFive);
+                action = action.addFiles(FileUpload.fromData(img, "board.png"));
+            }
+            if (showRow != null) {
+                action = action.setComponents(showRow);
+            }
+            action.queue(s -> {}, e -> {});
+        } catch (Exception e) {
+            t.sendMessage(b.toString()).queue(s -> {}, e2 -> {});
+        }
     }
 
     private List<Card> findWinnerBestFive(HandResult r) {
@@ -766,15 +778,6 @@ public class GameSession {
             }
         }
         return List.of();
-    }
-
-    private void postShowCardButtons() {
-        boolean anyCanShow = lastHoleCards.keySet().stream().anyMatch(uid -> !shownCards.contains(uid));
-        if (!anyCanShow) return;
-        postKeptRows("🃏 Show your cards? (10s)", ActionRow.of(
-                Button.primary("show:card1", "Show card 1"),
-                Button.primary("show:card2", "Show card 2"),
-                Button.success("show:both", "Show both")));
     }
 
     private void postStreetAnnouncement() {
@@ -888,34 +891,6 @@ public class GameSession {
         ThreadChannel t = thread();
         if (t != null) {
             t.sendMessage(content).queue(s -> {
-            }, e -> {
-            });
-        }
-    }
-
-    /** Posts a message that is deliberately NOT tracked for cleanup (kept as history). */
-    private void postKept(String content) {
-        ThreadChannel t = thread();
-        if (t != null) {
-            t.sendMessage(content).queue(s -> {
-            }, e -> {
-            });
-        }
-    }
-
-    private void postKeptWithImage(String content, byte[] image, String filename) {
-        ThreadChannel t = thread();
-        if (t != null) {
-            t.sendMessage(content)
-                    .addFiles(FileUpload.fromData(image, filename))
-                    .queue(s -> {}, e -> {});
-        }
-    }
-
-    private void postKeptRows(String content, ActionRow... rows) {
-        ThreadChannel t = thread();
-        if (t != null) {
-            t.sendMessage(content).setComponents(rows).queue(s -> {
             }, e -> {
             });
         }
