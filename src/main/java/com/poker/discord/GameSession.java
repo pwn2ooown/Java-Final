@@ -20,8 +20,11 @@ import org.slf4j.LoggerFactory;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.Random;
+import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
@@ -60,6 +63,8 @@ public class GameSession {
     });
 
     private final List<Long> handMessageIds = new ArrayList<>();
+    private final Map<Long, List<Card>> lastHoleCards = new ConcurrentHashMap<>();
+    private final Set<Long> shownCards = ConcurrentHashMap.newKeySet();
     private volatile long threadId;
     private volatile long ownerId;
 
@@ -213,6 +218,49 @@ public class GameSession {
                 } catch (Exception e) {
                     ephem(hook, sb.toString());
                 }
+            }
+        });
+    }
+
+    public void onShowCards(long userId, String choice, InteractionHook hook) {
+        exec.execute(() -> {
+            List<Card> hole = lastHoleCards.get(userId);
+            if (hole == null || hole.isEmpty()) {
+                ephem(hook, "You have no cards to show.");
+                return;
+            }
+            if (!shownCards.add(userId)) {
+                ephem(hook, "You already showed your cards.");
+                return;
+            }
+            List<Card> toShow;
+            String label;
+            switch (choice) {
+                case "card1" -> {
+                    toShow = List.of(hole.get(0));
+                    label = cards(toShow);
+                }
+                case "card2" -> {
+                    toShow = hole.size() > 1 ? List.of(hole.get(1)) : List.of(hole.get(0));
+                    label = cards(toShow);
+                }
+                default -> {
+                    toShow = hole;
+                    label = cards(toShow);
+                }
+            }
+            try {
+                byte[] img = CardRenderer.renderCards(toShow);
+                ThreadChannel t = thread();
+                if (t != null) {
+                    t.sendMessage("🃏 " + mention(userId) + " shows: **" + label + "**")
+                            .addFiles(FileUpload.fromData(img, "shown.png"))
+                            .queue(s -> {}, e -> {});
+                }
+                ephem(hook, "✅ Cards shown!");
+            } catch (Exception e) {
+                postRoom("🃏 " + mention(userId) + " shows: **" + label + "**");
+                ephem(hook, "✅ Cards shown!");
             }
         });
     }
@@ -499,18 +547,7 @@ public class GameSession {
         }
         buttons.add(Button.secondary("act:cards", "🂠 View my cards"));
 
-        if (!game.board().isEmpty()) {
-            try {
-                byte[] boardImg = CardRenderer.renderCards(game.board());
-                actionMessageId = postHandWithImage(content.toString(), boardImg, "board.png",
-                        ActionRow.of(buttons));
-            } catch (Exception e) {
-                log.warn("Card image rendering failed, using text fallback", e);
-                actionMessageId = postHand(content.toString(), ActionRow.of(buttons));
-            }
-        } else {
-            actionMessageId = postHand(content.toString(), ActionRow.of(buttons));
-        }
+        actionMessageId = postHand(content.toString(), ActionRow.of(buttons));
 
         int token = ++actionSeq;
         reminderTask = exec.schedule(() -> onReminder(token),
@@ -539,11 +576,18 @@ public class GameSession {
             return;
         }
         long uid = cur.userId;
+        long toCall = game.callAmountFor(cur);
         if (cur.timeoutStrikes == 0) {
             cur.timeoutStrikes = 1;
-            postRoom("⏰ " + mention(uid) + " ran out of time and was folded automatically. "
-                    + "(Warning 1/2 — a second timeout means a kick.)");
-            game.applyAction(uid, ActionType.FOLD, 0);
+            if (toCall == 0) {
+                postRoom("⏰ " + mention(uid) + " ran out of time — auto-checked. "
+                        + "(Warning 1/2 — a second timeout means a kick.)");
+                game.applyAction(uid, ActionType.CHECK, 0);
+            } else {
+                postRoom("⏰ " + mention(uid) + " ran out of time — auto-folded. "
+                        + "(Warning 1/2 — a second timeout means a kick.)");
+                game.applyAction(uid, ActionType.FOLD, 0);
+            }
         } else {
             postRoom("⏰ " + mention(uid) + " timed out again and was **kicked** from the room.");
             game.applyAction(uid, ActionType.FOLD, 0);
@@ -559,16 +603,28 @@ public class GameSession {
         boolean showdown = reveal && game.aliveInHand() >= 2;
         log.info("Hand #{} finished: reveal={} showdown={} board={} pot={}",
                 game.handNumber(), reveal, showdown, cardsPlain(game.board()), game.totalPot());
+
+        lastHoleCards.clear();
+        shownCards.clear();
+        Set<Long> revealedUserIds = ConcurrentHashMap.newKeySet();
+        for (Player p : game.seats()) {
+            if (p.inHand && !p.hole.isEmpty()) {
+                lastHoleCards.put(p.userId, new ArrayList<>(p.hole));
+            }
+        }
+
         HandResult result = game.settle(showdown);
         if (showdown) {
             for (HandResult.Reveal rv : result.reveals) {
                 log.info("  Showdown — user={} hole={} hand={}",
                         rv.userId, cardsPlain(rv.hole), rv.handDesc);
+                revealedUserIds.add(rv.userId);
             }
         }
         for (HandResult.PotAward a : result.awards) {
             log.info("  {} ({}): winners={} desc={}", a.label, a.amount, a.winners, a.handDesc);
         }
+        shownCards.addAll(revealedUserIds);
         postResults(result);
         persist(result);
 
@@ -700,7 +756,17 @@ public class GameSession {
                     b.append("↩️ Returned ").append(amt).append(" (uncalled) to ").append(mention(uid)).append("\n"));
         }
         b.append("\n").append(standingsBlock());
-        postKept(b.toString());
+
+        boolean anyCanShow = lastHoleCards.keySet().stream().anyMatch(uid -> !shownCards.contains(uid));
+        if (anyCanShow) {
+            List<Button> showButtons = new ArrayList<>();
+            showButtons.add(Button.primary("show:card1", "Show card 1"));
+            showButtons.add(Button.primary("show:card2", "Show card 2"));
+            showButtons.add(Button.success("show:both", "Show both"));
+            postKeptRows(b.toString(), ActionRow.of(showButtons));
+        } else {
+            postKept(b.toString());
+        }
     }
 
     private void postStreetAnnouncement() {
@@ -839,6 +905,15 @@ public class GameSession {
         ThreadChannel t = thread();
         if (t != null) {
             t.sendMessage(content).queue(s -> {
+            }, e -> {
+            });
+        }
+    }
+
+    private void postKeptRows(String content, ActionRow... rows) {
+        ThreadChannel t = thread();
+        if (t != null) {
+            t.sendMessage(content).setComponents(rows).queue(s -> {
             }, e -> {
             });
         }

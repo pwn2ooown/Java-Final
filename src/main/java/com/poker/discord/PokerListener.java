@@ -207,6 +207,10 @@ public class PokerListener extends ListenerAdapter {
                 event.deferReply(true).queue();
                 session.onViewCards(userId, event.getHook());
             }
+            case "show:card1", "show:card2", "show:both" -> {
+                event.deferReply(true).queue();
+                session.onShowCards(userId, id.substring(5), event.getHook());
+            }
             default -> event.reply("Unknown button.").setEphemeral(true).queue();
         }
     }
