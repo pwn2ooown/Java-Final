@@ -29,11 +29,13 @@ public class HandResult {
         public final long userId;
         public final List<Card> hole;
         public final String handDesc;
+        public final List<Card> bestFive;
 
-        public Reveal(long userId, List<Card> hole, String handDesc) {
+        public Reveal(long userId, List<Card> hole, String handDesc, List<Card> bestFive) {
             this.userId = userId;
             this.hole = hole;
             this.handDesc = handDesc;
+            this.bestFive = bestFive;
         }
     }
 

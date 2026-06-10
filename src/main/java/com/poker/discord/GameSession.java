@@ -205,6 +205,7 @@ public class GameSession {
                 }
                 Player self = game.playerById(userId);
                 long beforeStack = self == null ? 0 : self.stack;
+                log.debug("Action: user={} type={} amount={} stack={}", userId, t, amount, beforeStack);
                 game.applyAction(userId, t, amount);
                 // A voluntary action clears any timeout warning (strikes count only consecutively).
                 if (self != null) {
@@ -372,6 +373,8 @@ public class GameSession {
         stateMessageId = 0;
         actionMessageId = 0;
 
+        log.info("Hand #{} starting: {} players, button={}",
+                game.handNumber(), game.seats().size(), game.buttonUserId());
         postHand("🃏 **Hand #" + game.handNumber() + "** — Dealer button: " + mention(game.buttonUserId())
                 + " • Blinds **" + sb + "/" + bb + "**");
         postHand("Tap to privately check your hole cards (only you can see them):",
@@ -387,27 +390,33 @@ public class GameSession {
                 return;
             }
             if (game.aliveInHand() <= 1) {
+                log.debug("Hand #{}: only {} alive — finishing (no showdown)",
+                        game.handNumber(), game.aliveInHand());
                 finishHand(false);
                 return;
             }
             if (game.bettingRoundComplete()) {
                 if (game.street() == com.poker.game.Street.RIVER) {
+                    log.debug("Hand #{}: river betting complete — going to showdown", game.handNumber());
                     finishHand(true);
                     return;
                 }
                 int ableNow = game.ableToAct();
                 game.dealNextStreet();
+                log.debug("Hand #{}: dealt {} — board: {} (ableToAct={})",
+                        game.handNumber(), game.street(), cardsPlain(game.board()), ableNow);
                 postTableState();
                 if (ableNow < 2) {
-                    // No more betting possible — run the board out and show down.
+                    log.debug("Hand #{}: all-in run-out from {} to RIVER", game.handNumber(), game.street());
                     while (game.street() != com.poker.game.Street.RIVER) {
                         game.dealNextStreet();
+                        log.debug("Hand #{}: dealt {} — board: {}",
+                                game.handNumber(), game.street(), cardsPlain(game.board()));
                     }
                     postTableState();
                     finishHand(true);
                     return;
                 }
-                // A fresh betting round opened; loop will prompt the first actor.
             } else {
                 promptCurrentActor();
                 return;
@@ -508,7 +517,18 @@ public class GameSession {
     private void finishHand(boolean reveal) {
         cancelTimeout();
         boolean showdown = reveal && game.aliveInHand() >= 2;
+        log.info("Hand #{} finished: reveal={} showdown={} board={} pot={}",
+                game.handNumber(), reveal, showdown, cardsPlain(game.board()), game.totalPot());
         HandResult result = game.settle(showdown);
+        if (showdown) {
+            for (HandResult.Reveal rv : result.reveals) {
+                log.info("  Showdown — user={} hole={} hand={}",
+                        rv.userId, cardsPlain(rv.hole), rv.handDesc);
+            }
+        }
+        for (HandResult.PotAward a : result.awards) {
+            log.info("  {} ({}): winners={} desc={}", a.label, a.amount, a.winners, a.handDesc);
+        }
         postTableState();
         postResults(result);
         persist(result);
@@ -620,10 +640,17 @@ public class GameSession {
     private void postResults(HandResult r) {
         StringBuilder b = new StringBuilder();
         b.append(r.showdown ? "🎴 **Showdown**\n" : "🏆 **Hand result**\n");
+        if (!r.board.isEmpty()) {
+            b.append("Board: **").append(cards(r.board)).append("**\n\n");
+        }
         if (r.showdown) {
             for (HandResult.Reveal rv : r.reveals) {
                 b.append("• ").append(mention(rv.userId)).append(": ")
-                        .append(cards(rv.hole)).append(" — ").append(rv.handDesc).append("\n");
+                        .append(cards(rv.hole)).append(" — **").append(rv.handDesc).append("**");
+                if (rv.bestFive != null && !rv.bestFive.isEmpty()) {
+                    b.append(" (").append(cards(rv.bestFive)).append(")");
+                }
+                b.append("\n");
             }
             b.append("\n");
         }

@@ -544,7 +544,8 @@ public class PokerGame {
                 if (p.isActive()) {
                     HandValue hv = handValue(i, handCache);
                     result.reveals.add(new HandResult.Reveal(
-                            p.userId, new ArrayList<>(p.hole), hv.describe()));
+                            p.userId, new ArrayList<>(p.hole), hv.describe(),
+                            new ArrayList<>(hv.bestFive())));
                 }
             }
         }
