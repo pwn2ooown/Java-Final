@@ -289,13 +289,12 @@ public class GameSession {
                 boolean nowAllIn = self != null && self.stack == 0;
                 cancelTimeout();
                 lastActions.put(userId, actionShort(t, amount, committed, nowAllIn));
-                ephem(hook, confirm(t, amount, committed, nowAllIn));
                 proceed();
             } catch (InvalidActionException e) {
-                ephem(hook, "❌ " + e.getMessage());
+                ephemExplicit(hook, "❌ " + e.getMessage());
             } catch (Exception e) {
                 log.error("action failed", e);
-                ephem(hook, "⚠️ Internal error processing your action.");
+                ephemExplicit(hook, "⚠️ Internal error processing your action.");
             }
         });
     }
@@ -999,6 +998,12 @@ public class GameSession {
 
     private void ephem(InteractionHook hook, String message) {
         hook.sendMessage(message).queue(s -> {
+        }, e -> {
+        });
+    }
+
+    private void ephemExplicit(InteractionHook hook, String message) {
+        hook.sendMessage(message).setEphemeral(true).queue(s -> {
         }, e -> {
         });
     }

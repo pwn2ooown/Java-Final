@@ -188,19 +188,19 @@ public class PokerListener extends ListenerAdapter {
         }
         switch (id) {
             case "act:fold" -> {
-                event.deferReply(true).queue();
+                event.deferEdit().queue();
                 session.onAction(userId, ActionType.FOLD, 0, event.getHook());
             }
             case "act:check" -> {
-                event.deferReply(true).queue();
+                event.deferEdit().queue();
                 session.onAction(userId, ActionType.CHECK, 0, event.getHook());
             }
             case "act:call" -> {
-                event.deferReply(true).queue();
+                event.deferEdit().queue();
                 session.onAction(userId, ActionType.CALL, 0, event.getHook());
             }
             case "act:allin" -> {
-                event.deferReply(true).queue();
+                event.deferEdit().queue();
                 session.onAction(userId, ActionType.ALL_IN, 0, event.getHook());
             }
             case "act:cards" -> {
