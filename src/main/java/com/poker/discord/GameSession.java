@@ -408,8 +408,6 @@ public class GameSession {
                 game.handNumber(), game.seats().size(), game.buttonUserId());
         postHand("🃏 **Hand #" + game.handNumber() + "** — Dealer button: " + mention(game.buttonUserId())
                 + " • Blinds **" + sb + "/" + bb + "**");
-        postHand("Tap to privately view your hole cards and current best hand:",
-                ActionRow.of(Button.primary("act:cards", "🂠 View my cards")));
         proceed();
     }
 
@@ -487,12 +485,12 @@ public class GameSession {
         if (toCall == 0) {
             buttons.add(Button.primary("act:check", "Check"));
             buttons.add(Button.success("act:raise", "Bet"));
-            buttons.add(Button.success("act:allin", "All-in " + allInTo));
+            buttons.add(Button.success("act:allin", "🔺 All-in " + allInTo));
             buttons.add(Button.danger("act:fold", "Fold"));
         } else if (canRaise) {
             buttons.add(Button.primary("act:call", "Call " + toCall));
             buttons.add(Button.success("act:raise", "Raise"));
-            buttons.add(Button.success("act:allin", "All-in " + allInTo));
+            buttons.add(Button.success("act:allin", "🔺 All-in " + allInTo));
             buttons.add(Button.danger("act:fold", "Fold"));
         } else {
             buttons.add(Button.primary("act:call",
@@ -500,17 +498,20 @@ public class GameSession {
             buttons.add(Button.danger("act:fold", "Fold"));
         }
 
+        ActionRow actRow = ActionRow.of(buttons);
+        ActionRow cardRow = ActionRow.of(Button.secondary("act:cards", "🂠 View my cards"));
+
         if (!game.board().isEmpty()) {
             try {
                 byte[] boardImg = CardRenderer.renderCards(game.board());
-                actionMessageId = postHandWithImage(content.toString(), boardImg, "board.png",
-                        ActionRow.of(buttons));
+                actionMessageId = postHandWithImageRows(content.toString(), boardImg, "board.png",
+                        actRow, cardRow);
             } catch (Exception e) {
                 log.warn("Card image rendering failed, using text fallback", e);
-                actionMessageId = postHand(content.toString(), ActionRow.of(buttons));
+                actionMessageId = postHandRows(content.toString(), actRow, cardRow);
             }
         } else {
-            actionMessageId = postHand(content.toString(), ActionRow.of(buttons));
+            actionMessageId = postHandRows(content.toString(), actRow, cardRow);
         }
 
         int token = ++actionSeq;
@@ -813,6 +814,35 @@ public class GameSession {
         }
     }
 
+    private long postHandRows(String content, ActionRow... rows) {
+        ThreadChannel t = thread();
+        if (t == null) return 0;
+        try {
+            long id = t.sendMessage(content).setComponents(rows).complete().getIdLong();
+            handMessageIds.add(id);
+            return id;
+        } catch (Exception e) {
+            log.warn("postHandRows failed", e);
+            return 0;
+        }
+    }
+
+    private long postHandWithImageRows(String content, byte[] image, String filename, ActionRow... rows) {
+        ThreadChannel t = thread();
+        if (t == null) return 0;
+        try {
+            long id = t.sendMessage(content)
+                    .addFiles(FileUpload.fromData(image, filename))
+                    .setComponents(rows)
+                    .complete().getIdLong();
+            handMessageIds.add(id);
+            return id;
+        } catch (Exception e) {
+            log.warn("postHandWithImageRows failed", e);
+            return 0;
+        }
+    }
+
     private void postRoom(String content) {
         ThreadChannel t = thread();
         if (t != null) {
@@ -910,7 +940,7 @@ public class GameSession {
             case BET -> "✅ You bet " + amount + ".";
             case RAISE -> "✅ You raised to " + amount + ".";
             case ALL_IN -> nowAllIn
-                    ? "💥 You are all-in for " + committed + "!"
+                    ? "🔺 You are all-in for " + committed + "!"
                     : "✅ You called " + committed + ".";
         };
     }

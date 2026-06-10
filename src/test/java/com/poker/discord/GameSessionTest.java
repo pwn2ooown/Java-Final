@@ -14,6 +14,6 @@ class GameSessionTest {
 
     @Test
     void allInConfirmationIncludesActualCommittedAmount() {
-        assertEquals("💥 You are all-in for 75!", GameSession.confirm(ActionType.ALL_IN, 0, 75, true));
+        assertEquals("🔺 You are all-in for 75!", GameSession.confirm(ActionType.ALL_IN, 0, 75, true));
     }
 }
