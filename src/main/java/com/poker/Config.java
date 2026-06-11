@@ -34,6 +34,14 @@ public class Config {
                             && ((value.startsWith("\"") && value.endsWith("\""))
                             || (value.startsWith("'") && value.endsWith("'")))) {
                         value = value.substring(1, value.length() - 1);
+                    } else {
+                        // Unquoted values may carry an inline comment: KEY=123 # dev
+                        int hash = value.indexOf('#');
+                        if (hash == 0) {
+                            value = "";
+                        } else if (hash > 0 && Character.isWhitespace(value.charAt(hash - 1))) {
+                            value = value.substring(0, hash).trim();
+                        }
                     }
                     dotenv.put(key, value);
                 }

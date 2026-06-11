@@ -13,7 +13,8 @@ import java.util.concurrent.ConcurrentHashMap;
 public class GameManager {
 
     private final Database db;
-    private JDA jda;
+    /** Written once by the main thread after login, read from JDA/session threads. */
+    private volatile JDA jda;
 
     private final Map<Long, GameSession> byThread = new ConcurrentHashMap<>();
 
@@ -40,6 +41,17 @@ public class GameManager {
 
     public void registerThread(long threadId, GameSession session) {
         byThread.put(threadId, session);
+    }
+
+    /** Number of live rooms owned by {@code userId} — caps room spam. */
+    public int roomsOwnedBy(long userId) {
+        int n = 0;
+        for (GameSession s : byThread.values()) {
+            if (!s.ended() && s.ownerId() == userId) {
+                n++;
+            }
+        }
+        return n;
     }
 
     public void unregister(GameSession session) {
