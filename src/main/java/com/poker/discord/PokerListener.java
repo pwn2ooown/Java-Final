@@ -71,6 +71,11 @@ public class PokerListener extends ListenerAdapter {
                         .setEphemeral(true).queue();
                 return;
             }
+            if (manager.roomsOwnedBy(userId) >= MAX_ROOMS_PER_OWNER) {
+                event.reply("You already own " + MAX_ROOMS_PER_OWNER + " open rooms — end one first "
+                        + "(`/poker end` in its thread).").setEphemeral(true).queue();
+                return;
+            }
             long buyin = longOpt(event, "buyin");
             long sb = longOpt(event, "sb");
             long bb = longOpt(event, "bb");
@@ -88,7 +93,9 @@ public class PokerListener extends ListenerAdapter {
 
         GameSession session = manager.resolve(channelId);
         if (session == null) {
-            event.reply("No poker room here. Open one with `/poker open`.").setEphemeral(true).queue();
+            event.reply("No poker room is registered for **this** channel. Game commands work inside the "
+                    + "room's private thread — use the **Join**/**Start** buttons on the table message, "
+                    + "or open a new room with `/poker open`.").setEphemeral(true).queue();
             return;
         }
         switch (sub) {
@@ -123,11 +130,14 @@ public class PokerListener extends ListenerAdapter {
     private void action(SlashCommandInteractionEvent event, ActionType type, long amount) {
         GameSession session = manager.resolve(event.getChannel().getIdLong());
         if (session == null) {
-            event.reply("No poker game here.").setEphemeral(true).queue();
+            event.reply("No poker game here — betting commands work inside the game thread.")
+                    .setEphemeral(true).queue();
             return;
         }
         event.deferReply(true).queue();
-        session.onAction(event.getUser().getIdLong(), type, amount, event.getHook());
+        // Slash commands are always treated as current (token -1) and get an
+        // ephemeral confirmation, since their deferred reply must be completed.
+        session.onAction(event.getUser().getIdLong(), type, amount, event.getHook(), -1, true);
     }
 
     @Override
@@ -164,66 +174,70 @@ public class PokerListener extends ListenerAdapter {
 
         // In-thread buttons resolve by the thread channel.
         GameSession session = manager.resolve(channelId);
-
-        // The raise button opens a modal — it must be the initial response (no defer).
-        if (id.equals("act:raise")) {
-            if (session == null) {
-                event.reply("No poker game here.").setEphemeral(true).queue();
-                return;
-            }
-            TextInput amount = TextInput.create("amount", "Bet / raise to (total chips)", TextInputStyle.SHORT)
-                    .setRequired(true)
-                    .setPlaceholder("e.g. 150")
-                    .build();
-            Modal modal = Modal.create("act:raisemodal", "Bet / Raise")
-                    .addComponents(ActionRow.of(amount))
-                    .build();
-            event.replyModal(modal).queue();
-            return;
-        }
-
         if (session == null) {
             event.reply("No poker game here.").setEphemeral(true).queue();
             return;
         }
-        switch (id) {
-            case "act:fold" -> {
-                event.deferEdit().queue();
-                session.onAction(userId, ActionType.FOLD, 0, event.getHook());
-            }
-            case "act:check" -> {
-                event.deferEdit().queue();
-                session.onAction(userId, ActionType.CHECK, 0, event.getHook());
-            }
-            case "act:call" -> {
-                event.deferEdit().queue();
-                session.onAction(userId, ActionType.CALL, 0, event.getHook());
-            }
-            case "act:allin" -> {
-                event.deferEdit().queue();
-                session.onAction(userId, ActionType.ALL_IN, 0, event.getHook());
-            }
-            case "act:cards" -> {
-                event.deferReply(true).queue();
-                session.onViewCards(userId, event.getHook());
-            }
-            default -> {
-                if (id.startsWith("show:")) {
-                    String choice = id.substring(5);
-                    event.deferReply(true).queue();
-                    session.onShowCards(userId, choice, event.getHook());
-                    return;
+
+        // Action buttons are "act:<verb>:<token>" — the token pins them to one
+        // prompt so stale buttons can't fire into a different betting context.
+        if (id.startsWith("act:")) {
+            String[] parts = id.split(":");
+            String verb = parts.length > 1 ? parts[1] : "";
+            int token = parseToken(parts);
+            switch (verb) {
+                // The raise button opens a modal — it must be the initial response
+                // (no defer). The token rides along in the modal ID so a stale
+                // dialog submission is rejected too.
+                case "raise" -> {
+                    TextInput amount = TextInput.create("amount", "Bet / raise to (total chips)", TextInputStyle.SHORT)
+                            .setRequired(true)
+                            .setPlaceholder("e.g. 150")
+                            .build();
+                    Modal modal = Modal.create("act:raisemodal:" + token, "Bet / Raise")
+                            .addComponents(ActionRow.of(amount))
+                            .build();
+                    event.replyModal(modal).queue();
                 }
-                event.reply("Unknown button.").setEphemeral(true).queue();
+                case "fold" -> {
+                    event.deferEdit().queue();
+                    session.onAction(userId, ActionType.FOLD, 0, event.getHook(), token, false);
+                }
+                case "check" -> {
+                    event.deferEdit().queue();
+                    session.onAction(userId, ActionType.CHECK, 0, event.getHook(), token, false);
+                }
+                case "call" -> {
+                    event.deferEdit().queue();
+                    session.onAction(userId, ActionType.CALL, 0, event.getHook(), token, false);
+                }
+                case "allin" -> {
+                    event.deferEdit().queue();
+                    session.onAction(userId, ActionType.ALL_IN, 0, event.getHook(), token, false);
+                }
+                case "cards" -> {
+                    event.deferReply(true).queue();
+                    session.onViewCards(userId, event.getHook());
+                }
+                default -> event.reply("Unknown button.").setEphemeral(true).queue();
             }
+            return;
         }
+
+        if (id.startsWith("show:")) {
+            String choice = id.substring(5);
+            event.deferReply(true).queue();
+            session.onShowCards(userId, choice, event.getHook());
+            return;
+        }
+        event.reply("Unknown button.").setEphemeral(true).queue();
     }
 
     @Override
     public void onModalInteraction(ModalInteractionEvent event) {
         log.info("Modal '{}' from {} ({}) channel={}", event.getModalId(),
                 event.getUser().getName(), event.getUser().getId(), event.getChannel().getId());
-        if (!"act:raisemodal".equals(event.getModalId())) {
+        if (!event.getModalId().startsWith("act:raisemodal")) {
             return;
         }
         GameSession session = manager.resolve(event.getChannel().getIdLong());
@@ -231,6 +245,7 @@ public class PokerListener extends ListenerAdapter {
             event.reply("No poker game here.").setEphemeral(true).queue();
             return;
         }
+        int token = parseToken(event.getModalId().split(":"));
         String raw = event.getValue("amount") == null ? "" : event.getValue("amount").getAsString().trim();
         long amount;
         try {
@@ -244,8 +259,24 @@ public class PokerListener extends ListenerAdapter {
             return;
         }
         event.deferReply(true).queue();
-        // onAction normalizes BET vs RAISE based on whether there is already a bet.
-        session.onAction(event.getUser().getIdLong(), ActionType.RAISE, amount, event.getHook());
+        // The engine normalizes BET vs RAISE based on whether there is already a bet.
+        session.onAction(event.getUser().getIdLong(), ActionType.RAISE, amount, event.getHook(), token, true);
+    }
+
+    /**
+     * Extracts the prompt token from a component/modal ID split on ':'.
+     * Missing or malformed tokens (old-format buttons) map to -2, which the
+     * session rejects as stale — only slash commands use the always-current -1.
+     */
+    private static int parseToken(String[] parts) {
+        if (parts.length < 3) {
+            return -2;
+        }
+        try {
+            return Integer.parseInt(parts[2]);
+        } catch (NumberFormatException e) {
+            return -2;
+        }
     }
 
     private static long longOpt(SlashCommandInteractionEvent event, String name) {
@@ -254,6 +285,7 @@ public class PokerListener extends ListenerAdapter {
     }
 
     private static final long MAX_CHIPS = 10_000_000;
+    private static final int MAX_ROOMS_PER_OWNER = 3;
 
     private static String validateOpen(long buyin, long sb, long bb) {
         if (sb <= 0 || bb <= 0) {

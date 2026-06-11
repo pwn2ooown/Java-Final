@@ -45,6 +45,10 @@ public class GameSession {
     private static final long ACTION_TIMEOUT_SECONDS = 30;
     private static final long REMINDER_BEFORE_SECONDS = 10;
     private static final long RESULT_LINGER_SECONDS = 10;
+    /** Seat cap — far below the 23-player limit of a single 52-card deck. */
+    static final int MAX_PLAYERS = 10;
+    /** Discord caps messages at 2000 chars; clip with headroom for the marker. */
+    private static final int MAX_MESSAGE_CHARS = 1900;
 
     private final GameManager manager;
     private final long guildId;
@@ -66,6 +70,8 @@ public class GameSession {
     private final Map<Long, List<Card>> lastHoleCards = new ConcurrentHashMap<>();
     private final Set<Long> shownCards = ConcurrentHashMap.newKeySet();
     private final Map<Long, String> lastActions = new ConcurrentHashMap<>();
+    /** The kept results message — its show-cards buttons are stripped after the 10s window. */
+    private volatile long resultsMessageId;
     private volatile long threadId;
     private volatile long ownerId;
 
@@ -101,16 +107,49 @@ public class GameSession {
         return threadId;
     }
 
+    public long ownerId() {
+        return ownerId;
+    }
+
+    public boolean ended() {
+        return ended;
+    }
+
+    // ------------------------------------------------------------------
+    // Executor plumbing — every task is wrapped so an unexpected exception is
+    // logged instead of vanishing inside the executor's discarded future.
+    // ------------------------------------------------------------------
+
+    private void onExec(String what, Runnable task) {
+        exec.execute(() -> {
+            try {
+                task.run();
+            } catch (Exception e) {
+                log.error("{} failed", what, e);
+            }
+        });
+    }
+
+    private ScheduledFuture<?> later(String what, long delay, TimeUnit unit, Runnable task) {
+        return exec.schedule(() -> {
+            try {
+                task.run();
+            } catch (Exception e) {
+                log.error("{} failed", what, e);
+            }
+        }, delay, unit);
+    }
+
     // ------------------------------------------------------------------
     // Public entry points (called from the listener; each runs on exec)
     // ------------------------------------------------------------------
 
     public void init(InteractionHook hook) {
-        exec.execute(() -> doInit(hook));
+        onExec("init", () -> doInit(hook));
     }
 
     public void onJoin(long userId, String name, InteractionHook hook) {
-        exec.execute(() -> {
+        onExec("join", () -> {
             try {
                 doJoin(userId, name, hook);
             } catch (Exception e) {
@@ -121,7 +160,7 @@ public class GameSession {
     }
 
     public void onStart(long userId, InteractionHook hook) {
-        exec.execute(() -> {
+        onExec("start", () -> {
             try {
                 doStart(userId, hook);
             } catch (Exception e) {
@@ -132,7 +171,7 @@ public class GameSession {
     }
 
     public void onLeave(long userId, InteractionHook hook) {
-        exec.execute(() -> {
+        onExec("leave", () -> {
             try {
                 doLeave(userId, hook);
             } catch (Exception e) {
@@ -143,7 +182,7 @@ public class GameSession {
     }
 
     public void onEnd(long userId, InteractionHook hook) {
-        exec.execute(() -> {
+        onExec("end", () -> {
             if (userId != ownerId) {
                 ephem(hook, "Only the room owner can end the game.");
                 return;
@@ -160,7 +199,7 @@ public class GameSession {
     }
 
     public void onForceEnd(long userId, InteractionHook hook) {
-        exec.execute(() -> {
+        onExec("forceend", () -> {
             if (userId != ownerId) {
                 ephem(hook, "Only the room owner can force-end the game.");
                 return;
@@ -171,7 +210,7 @@ public class GameSession {
     }
 
     public void onStatus(long userId, InteractionHook hook) {
-        exec.execute(() -> {
+        onExec("status", () -> {
             if (started && game.handInProgress()) {
                 String status = tableText();
                 if (!game.board().isEmpty()) {
@@ -179,11 +218,14 @@ public class GameSession {
                         byte[] img = CardRenderer.renderCards(game.board());
                         hook.sendMessage(status)
                                 .addFiles(FileUpload.fromData(img, "board.png"))
+                                .setEphemeral(true)
                                 .queue(s -> {}, e -> {});
                         return;
                     } catch (Exception ignored) {}
                 }
                 ephem(hook, status);
+            } else if (started) {
+                ephem(hook, "Between hands — the next hand starts in a few seconds.\n" + standingsBlock());
             } else {
                 ephem(hook, "Room is waiting. Seated players: " + game.seats().size()
                         + ". Owner: " + mention(ownerId) + ". Use `/poker start` to begin.");
@@ -192,7 +234,7 @@ public class GameSession {
     }
 
     public void onViewCards(long userId, InteractionHook hook) {
-        exec.execute(() -> {
+        onExec("viewcards", () -> {
             Player p = game.playerById(userId);
             if (p == null) {
                 ephem(hook, "You are not seated in this room.");
@@ -214,6 +256,7 @@ public class GameSession {
                     byte[] holeImg = CardRenderer.renderCards(p.hole);
                     hook.sendMessage(sb.toString())
                             .addFiles(FileUpload.fromData(holeImg, "hole.png"))
+                            .setEphemeral(true)
                             .queue(s -> {}, e -> {});
                 } catch (Exception e) {
                     ephem(hook, sb.toString());
@@ -223,7 +266,7 @@ public class GameSession {
     }
 
     public void onShowCards(long userId, String choice, InteractionHook hook) {
-        exec.execute(() -> {
+        onExec("showcards", () -> {
             List<Card> hole = lastHoleCards.get(userId);
             if (hole == null || hole.isEmpty()) {
                 ephem(hook, "You have no cards to show.");
@@ -256,8 +299,17 @@ public class GameSession {
         });
     }
 
-    public void onAction(long userId, ActionType type, long amount, InteractionHook hook) {
-        exec.execute(() -> {
+    /**
+     * @param token the action sequence number embedded in the button/modal that
+     *              triggered this (rejects stale interactions), or -1 for slash
+     *              commands, which are always treated as current
+     * @param ack   true when the interaction was deferred as an ephemeral reply
+     *              (slash/modal) and expects a confirmation followup; buttons
+     *              are acknowledged silently
+     */
+    public void onAction(long userId, ActionType type, long amount, InteractionHook hook,
+                         int token, boolean ack) {
+        onExec("action", () -> {
             try {
                 if (ended) {
                     ephem(hook, "This room is closed.");
@@ -267,16 +319,16 @@ public class GameSession {
                     ephem(hook, "No hand is in progress.");
                     return;
                 }
-                ActionType t = type;
-                if (t == ActionType.RAISE && game.currentBet() == 0) {
-                    t = ActionType.BET;
-                } else if (t == ActionType.BET && game.currentBet() > 0) {
-                    t = ActionType.RAISE;
+                if (token != -1 && token != actionSeq) {
+                    // -1 = slash command (always current); anything else must match
+                    // the live prompt, so stale buttons/dialogs can't act.
+                    ephem(hook, "⌛ That button belongs to an earlier turn — use the current prompt.");
+                    return;
                 }
                 Player self = game.playerById(userId);
                 long beforeStack = self == null ? 0 : self.stack;
-                log.debug("Action: user={} type={} amount={} stack={}", userId, t, amount, beforeStack);
-                game.applyAction(userId, t, amount);
+                log.debug("Action: user={} type={} amount={} stack={}", userId, type, amount, beforeStack);
+                ActionType executed = game.applyAction(userId, type, amount);
                 // A voluntary action clears any timeout warning (strikes count only consecutively).
                 if (self != null) {
                     self.timeoutStrikes = 0;
@@ -284,13 +336,16 @@ public class GameSession {
                 long committed = self == null ? 0 : beforeStack - self.stack;
                 boolean nowAllIn = self != null && self.stack == 0;
                 cancelTimeout();
-                lastActions.put(userId, actionShort(t, amount, committed, nowAllIn));
+                lastActions.put(userId, actionShort(executed, amount, committed, nowAllIn));
+                if (ack) {
+                    ephem(hook, confirm(executed, amount, committed, nowAllIn));
+                }
                 proceed();
             } catch (InvalidActionException e) {
-                ephemExplicit(hook, "❌ " + e.getMessage());
+                ephem(hook, "❌ " + e.getMessage());
             } catch (Exception e) {
                 log.error("action failed", e);
-                ephemExplicit(hook, "⚠️ Internal error processing your action.");
+                ephem(hook, "⚠️ Internal error processing your action.");
             }
         });
     }
@@ -308,14 +363,16 @@ public class GameSession {
                 log.warn("doInit: text channel {} not visible to the bot (missing access or not a guild member)",
                         parentChannelId);
                 ephem(hook, "⚠️ I can no longer see this channel.");
-                manager.unregister(this);
+                abandonInit();
                 return;
             }
             Player owner = game.addPlayer(ownerId, ownerName, ++joinCounter);
             manager.db().upsertPlayer(roomDbId, str(ownerId), ownerName, owner.joinOrder, owner.stack);
 
             String roomCode = UUID.randomUUID().toString().substring(0, 8);
-            ThreadChannel thread = parent.createThreadChannel("game-" + roomCode, true).complete();
+            ThreadChannel thread = parent.createThreadChannel("game-" + roomCode, true)
+                    .setAutoArchiveDuration(ThreadChannel.AutoArchiveDuration.TIME_1_WEEK)
+                    .complete();
             threadId = thread.getIdLong();
             log.info("Created private thread {} (game-{}) for room (parent {})", threadId, roomCode, parentChannelId);
             manager.registerThread(threadId, this);
@@ -340,9 +397,22 @@ public class GameSession {
             log.error("Failed to create room", e);
             ephem(hook, "⚠️ I couldn't create the private thread. I need **Create Private Threads**, "
                     + "**Send Messages in Threads** and **Manage Threads** permissions in this channel.");
-            manager.unregister(this);
-            manager.db().closeRoom(roomDbId);
+            ThreadChannel t = thread();
+            if (t != null) {
+                t.delete().queue(s -> {
+                }, e2 -> {
+                });
+            }
+            abandonInit();
         }
+    }
+
+    /** Tears down a session whose init failed: registry, DB row and executor. */
+    private void abandonInit() {
+        ended = true;
+        manager.unregister(this);
+        manager.db().closeRoom(roomDbId);
+        exec.shutdown();
     }
 
     private void doJoin(long userId, String name, InteractionHook hook) {
@@ -355,11 +425,18 @@ public class GameSession {
             if (existing.wantsLeave) {
                 existing.wantsLeave = false;
                 addToThread(userId);
+                // afterHand may have already deleted the row; restore it.
+                manager.db().upsertPlayer(roomDbId, str(userId), existing.name, existing.joinOrder, existing.stack);
                 ephem(hook, "✅ You rejoined the room.");
                 postRoom(mention(userId) + " rejoined.");
+                reassignOwnerIfNeeded();
             } else {
                 ephem(hook, "You are already seated in this room.");
             }
+            return;
+        }
+        if (game.seats().size() >= MAX_PLAYERS) {
+            ephem(hook, "The table is full (" + MAX_PLAYERS + " players max).");
             return;
         }
         Player p = game.addPlayer(userId, name, ++joinCounter);
@@ -372,6 +449,8 @@ public class GameSession {
             postRoom(mention(userId) + " joined the table. (" + game.eligibleForHand().size() + " players)");
             ephem(hook, "✅ Joined! Table: <#" + threadId + ">");
         }
+        // If the room's owner left while it sat empty, hand control to a live player.
+        reassignOwnerIfNeeded();
     }
 
     private void doStart(long userId, InteractionHook hook) {
@@ -414,16 +493,17 @@ public class GameSession {
         ephem(hook, "👋 You left the room.");
         postRoom(mention(userId) + " left the table" + (game.handInProgress() ? " (folded this hand)" : "") + ".");
 
+        // A departing owner hands control over immediately — the remaining
+        // players must be able to end the game even mid-hand.
+        reassignOwnerIfNeeded();
+
         if (game.handInProgress()) {
             if (wasActor || game.aliveInHand() <= 1) {
                 cancelTimeout();
                 proceed();
             }
-        } else {
-            reassignOwnerIfNeeded();
-            if (game.eligibleForHand().size() < 2 && started) {
-                postRoom("⏸️ Not enough players to continue. Waiting for more with `/poker join`.");
-            }
+        } else if (game.eligibleForHand().size() < 2 && started) {
+            postRoom("⏸️ Not enough players to continue. Waiting for more with `/poker join`.");
         }
     }
 
@@ -446,8 +526,11 @@ public class GameSession {
 
         log.info("Hand #{} starting: {} players, button={}",
                 game.handNumber(), game.seats().size(), game.buttonUserId());
+        String deadSb = game.smallBlindDead()
+                ? "\n⚪ Small blind is **dead** this hand (the big blind never skips a player)."
+                : "";
         postHand("🃏 **Hand #" + game.handNumber() + "** — Dealer button: " + mention(game.buttonUserId())
-                + " • Blinds **" + sb + "/" + bb + "**");
+                + " • Blinds **" + sb + "/" + bb + "**" + deadSb);
         proceed();
     }
 
@@ -473,14 +556,14 @@ public class GameSession {
                 lastActions.clear();
                 game.dealNextStreet();
                 log.debug("Hand #{}: dealt {} — board: {} (ableToAct={})",
-                        game.handNumber(), game.street(), cardsPlain(game.board()), ableNow);
+                        game.handNumber(), game.street(), cards(game.board()), ableNow);
                 postStreetAnnouncement();
                 if (ableNow < 2) {
                     log.debug("Hand #{}: all-in run-out from {} to RIVER", game.handNumber(), game.street());
                     while (game.street() != com.poker.game.Street.RIVER) {
                         game.dealNextStreet();
                         log.debug("Hand #{}: dealt {} — board: {}",
-                                game.handNumber(), game.street(), cardsPlain(game.board()));
+                                game.handNumber(), game.street(), cards(game.board()));
                     }
                     postStreetAnnouncement();
                     finishHand(true);
@@ -508,32 +591,36 @@ public class GameSession {
         content.append(tableText()).append("\n");
         content.append("🎯 ").append(mention(p.userId)).append(" — **YOUR TURN** ⏰ 30s");
 
+        // The token in each component ID pins the button to THIS prompt: clicks
+        // from earlier prompts (or a stale raise dialog) are rejected instead of
+        // executing against a different betting context.
+        int token = ++actionSeq;
         List<Button> buttons = new ArrayList<>();
         if (toCall == 0) {
-            buttons.add(Button.primary("act:check", "Check"));
+            buttons.add(Button.primary("act:check:" + token, "Check"));
             if (canRaise) {
-                buttons.add(Button.success("act:raise", "Bet"));
-                buttons.add(Button.success("act:allin", "🔺 All-in " + allInTo));
+                // With a live bet (big-blind option) the action is a raise, not a bet.
+                buttons.add(Button.success("act:raise:" + token, game.currentBet() > 0 ? "Raise" : "Bet"));
+                buttons.add(Button.success("act:allin:" + token, "🔺 All-in " + allInTo));
             }
-            buttons.add(Button.danger("act:fold", "Fold"));
+            buttons.add(Button.danger("act:fold:" + token, "Fold"));
         } else if (canRaise) {
-            buttons.add(Button.primary("act:call", "Call " + toCall));
-            buttons.add(Button.success("act:raise", "Raise"));
-            buttons.add(Button.success("act:allin", "🔺 All-in " + allInTo));
-            buttons.add(Button.danger("act:fold", "Fold"));
+            buttons.add(Button.primary("act:call:" + token, "Call " + toCall));
+            buttons.add(Button.success("act:raise:" + token, "Raise"));
+            buttons.add(Button.success("act:allin:" + token, "🔺 All-in " + allInTo));
+            buttons.add(Button.danger("act:fold:" + token, "Fold"));
         } else {
-            buttons.add(Button.primary("act:call",
+            buttons.add(Button.primary("act:call:" + token,
                     toCall >= p.stack ? "Call all-in " + p.stack : "Call " + toCall));
-            buttons.add(Button.danger("act:fold", "Fold"));
+            buttons.add(Button.danger("act:fold:" + token, "Fold"));
         }
         buttons.add(Button.secondary("act:cards", "🂠 View my cards"));
 
         actionMessageId = postHand(content.toString(), ActionRow.of(buttons));
 
-        int token = ++actionSeq;
-        reminderTask = exec.schedule(() -> onReminder(token),
-                ACTION_TIMEOUT_SECONDS - REMINDER_BEFORE_SECONDS, TimeUnit.SECONDS);
-        timeoutTask = exec.schedule(() -> onTimeout(token), ACTION_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        reminderTask = later("reminder", ACTION_TIMEOUT_SECONDS - REMINDER_BEFORE_SECONDS,
+                TimeUnit.SECONDS, () -> onReminder(token));
+        timeoutTask = later("timeout", ACTION_TIMEOUT_SECONDS, TimeUnit.SECONDS, () -> onTimeout(token));
     }
 
     private void onReminder(int token) {
@@ -544,8 +631,9 @@ public class GameSession {
         if (cur == null) {
             return;
         }
+        String consequence = game.callAmountFor(cur) == 0 ? "checked" : "folded";
         postHand("⏰ " + mention(cur.userId) + " — about " + REMINDER_BEFORE_SECONDS
-                + " seconds left to act, or you'll be folded automatically.");
+                + " seconds left to act, or you'll be " + consequence + " automatically.");
     }
 
     private void onTimeout(int token) {
@@ -554,6 +642,13 @@ public class GameSession {
         }
         Player cur = game.currentActor();
         if (cur == null) {
+            return;
+        }
+        if (thread() == null) {
+            // The thread is archived/invisible: pause instead of silently folding
+            // players out of a game nobody can see. Retry until it comes back.
+            log.warn("Thread {} not visible — pausing the action clock", threadId);
+            timeoutTask = later("timeout-retry", 60, TimeUnit.SECONDS, () -> onTimeout(token));
             return;
         }
         long uid = cur.userId;
@@ -586,7 +681,7 @@ public class GameSession {
         cancelTimeout();
         boolean showdown = reveal && game.aliveInHand() >= 2;
         log.info("Hand #{} finished: reveal={} showdown={} board={} pot={}",
-                game.handNumber(), reveal, showdown, cardsPlain(game.board()), game.totalPot());
+                game.handNumber(), reveal, showdown, cards(game.board()), game.totalPot());
 
         lastHoleCards.clear();
         shownCards.clear();
@@ -601,7 +696,7 @@ public class GameSession {
         if (showdown) {
             for (HandResult.Reveal rv : result.reveals) {
                 log.info("  Showdown — user={} hole={} hand={}",
-                        rv.userId, cardsPlain(rv.hole), rv.handDesc);
+                        rv.userId, cards(rv.hole), rv.handDesc);
                 revealedUserIds.add(rv.userId);
             }
         }
@@ -612,10 +707,27 @@ public class GameSession {
         postResults(result);
         persist(result);
 
-        exec.schedule(() -> {
+        later("hand-cleanup", RESULT_LINGER_SECONDS, TimeUnit.SECONDS, () -> {
+            closeShowCardsWindow();
             cleanupHandMessages();
             afterHand();
-        }, RESULT_LINGER_SECONDS, TimeUnit.SECONDS);
+        });
+    }
+
+    /** Ends the post-hand show-cards window: buttons are removed and the cards forgotten. */
+    private void closeShowCardsWindow() {
+        lastHoleCards.clear();
+        shownCards.clear();
+        long msgId = resultsMessageId;
+        resultsMessageId = 0;
+        if (msgId != 0) {
+            ThreadChannel t = thread();
+            if (t != null) {
+                t.editMessageComponentsById(str(msgId), Collections.emptyList()).queue(s -> {
+                }, e -> {
+                });
+            }
+        }
     }
 
     private void afterHand() {
@@ -633,31 +745,38 @@ public class GameSession {
             return;
         }
         if (game.eligibleForHand().size() < 2) {
+            // Drop leavers and busted players NOW (startHand won't run to do it),
+            // so a busted player can re-join for a fresh buy-in.
+            game.pruneOut();
             started = false;
             manager.db().setState(roomDbId, "WAITING");
             postRoom("⏸️ Not enough players with chips to continue. The room is waiting — "
-                    + "use `/poker join` then `/poker start`, or `/poker forceend` to close.");
+                    + "busted players can `/poker join` again for a fresh buy-in, then the owner "
+                    + "uses `/poker start`, or `/poker forceend` to close.");
             return;
         }
         beginHand();
     }
 
     private void reassignOwnerIfNeeded() {
+        // During a hand, stack 0 means all-in, not busted — only treat an empty
+        // stack as gone between hands.
+        boolean handRunning = game.handInProgress();
         Player owner = game.playerById(ownerId);
-        boolean ownerGone = owner == null || owner.wantsLeave || owner.stack <= 0;
+        boolean ownerGone = owner == null || owner.wantsLeave || (owner.stack <= 0 && !handRunning);
         if (!ownerGone) {
             return;
         }
         Player next = null;
         for (Player p : game.seats()) {
-            if (p.wantsLeave || p.stack <= 0) {
+            if (p.wantsLeave || (p.stack <= 0 && !handRunning)) {
                 continue;
             }
             if (next == null || p.joinOrder < next.joinOrder) {
                 next = p;
             }
         }
-        if (next != null) {
+        if (next != null && next.userId != ownerId) {
             ownerId = next.userId;
             postRoom("👑 " + mention(ownerId) + " is now the room owner (by join order).");
         }
@@ -670,7 +789,17 @@ public class GameSession {
         ended = true;
         started = false;
         cancelTimeout();
-        postRoom(reason + "\n" + standingsBlock());
+        String refundNote = "";
+        if (game.handInProgress()) {
+            // Force-ended mid-hand: nobody wins the pot — every committed chip
+            // goes back to its owner so no chips vanish from the table.
+            game.abortHand();
+            refundNote = "↩️ The unfinished hand was cancelled — all bets were returned.\n";
+        }
+        for (Player p : game.seats()) {
+            manager.db().updateStack(roomDbId, str(p.userId), p.stack);
+        }
+        postRoom(reason + "\n" + refundNote + standingsBlock());
         manager.db().closeRoom(roomDbId);
         manager.unregister(this);
         ThreadChannel t = thread();
@@ -688,25 +817,29 @@ public class GameSession {
 
     private void persist(HandResult result) {
         try {
-            long pot = result.awards.stream().mapToLong(a -> a.amount).sum();
-            long handId = manager.db().recordHand(roomDbId, game.handNumber(), cardsPlain(result.board), pot);
-            if (handId < 0) {
-                return;
-            }
-            for (HandResult.PotAward award : result.awards) {
-                for (var payout : award.payouts.entrySet()) {
-                    Player p = game.playerById(payout.getKey());
-                    String hole = (p != null) ? cardsPlain(p.hole) : "";
-                    manager.db().recordResult(handId, str(payout.getKey()), payout.getValue(), hole, award.handDesc);
+            manager.db().inTransaction(() -> {
+                // Stacks are the state that matters for recovery — update them
+                // even if recording the hand history fails.
+                for (Player p : game.seats()) {
+                    manager.db().updateStack(roomDbId, str(p.userId), p.stack);
                 }
-            }
-            for (var refund : result.refunds.entrySet()) {
-                manager.db().recordResult(handId, str(refund.getKey()), refund.getValue(), "",
-                        "Uncalled bet returned");
-            }
-            for (Player p : game.seats()) {
-                manager.db().updateStack(roomDbId, str(p.userId), p.stack);
-            }
+                long pot = result.awards.stream().mapToLong(a -> a.amount).sum();
+                long handId = manager.db().recordHand(roomDbId, game.handNumber(), cards(result.board), pot);
+                if (handId < 0) {
+                    return;
+                }
+                for (HandResult.PotAward award : result.awards) {
+                    for (var payout : award.payouts.entrySet()) {
+                        Player p = game.playerById(payout.getKey());
+                        String hole = (p != null) ? cards(p.hole) : "";
+                        manager.db().recordResult(handId, str(payout.getKey()), payout.getValue(), hole, award.handDesc);
+                    }
+                }
+                for (var refund : result.refunds.entrySet()) {
+                    manager.db().recordResult(handId, str(refund.getKey()), refund.getValue(), "",
+                            "Uncalled bet returned");
+                }
+            });
         } catch (Exception e) {
             log.warn("persist failed", e);
         }
@@ -743,7 +876,7 @@ public class GameSession {
 
         boolean anyCanShow = lastHoleCards.keySet().stream().anyMatch(uid -> !shownCards.contains(uid));
         if (anyCanShow) {
-            b.append("\n🃏 Show your cards? (10s)");
+            b.append("\n🃏 Show your cards? (").append(RESULT_LINGER_SECONDS).append("s)");
         }
         ActionRow showRow = anyCanShow ? ActionRow.of(
                 Button.primary("show:card1", "Show card 1"),
@@ -752,10 +885,15 @@ public class GameSession {
 
         List<Card> winnerBestFive = findWinnerBestFive(r);
         ThreadChannel t = thread();
-        if (t == null) return;
+        if (t == null) {
+            log.warn("postResults: thread {} not visible, result not posted", threadId);
+            return;
+        }
 
+        String text = clip(b.toString());
+        resultsMessageId = 0;
         try {
-            var action = t.sendMessage(b.toString());
+            var action = t.sendMessage(text);
             if (r.showdown && !r.board.isEmpty() && !winnerBestFive.isEmpty()) {
                 byte[] img = CardRenderer.renderCardsHighlighted(new ArrayList<>(r.board), winnerBestFive);
                 action = action.addFiles(FileUpload.fromData(img, "board.png"));
@@ -763,9 +901,15 @@ public class GameSession {
             if (showRow != null) {
                 action = action.setComponents(showRow);
             }
-            action.queue(s -> {}, e -> {});
+            action.queue(s -> resultsMessageId = s.getIdLong(), e -> {});
         } catch (Exception e) {
-            t.sendMessage(b.toString()).queue(s -> {}, e2 -> {});
+            // Image rendering / attachment failed — fall back to plain text.
+            log.warn("postResults rich message failed, falling back to text", e);
+            try {
+                t.sendMessage(text).queue(s -> {}, e2 -> {});
+            } catch (Exception e2) {
+                log.error("postResults fallback failed", e2);
+            }
         }
     }
 
@@ -787,17 +931,17 @@ public class GameSession {
         try {
             byte[] img = CardRenderer.renderCards(game.board());
             String label = "🃏 **— " + game.street().display().toUpperCase() + " —**";
-            postHandWithImage(label, img, "board.png", null);
+            postHand(label, null, img, "board.png");
         } catch (Exception e) {
             postHand("🃏 **— " + game.street().display().toUpperCase()
-                    + " —**  " + cardsPlain(game.board()));
+                    + " —**  " + cards(game.board()));
         }
     }
 
     private String tableText() {
         StringBuilder b = new StringBuilder("```\n");
         b.append("Hand #").append(game.handNumber()).append("   ").append(game.street().display()).append("\n");
-        b.append("Board: ").append(game.board().isEmpty() ? "—" : cardsPlain(game.board())).append("\n");
+        b.append("Board: ").append(game.board().isEmpty() ? "—" : cards(game.board())).append("\n");
         b.append("Pot: ").append(game.totalPot()).append("    Blinds: ").append(sb).append("/").append(bb).append("\n");
         b.append("--------------------------------------\n");
         Player cur = game.currentActor();
@@ -814,7 +958,10 @@ public class GameSession {
             long toCall = game.callAmountFor(cur);
             boolean canRaise = game.canRaise(cur);
             b.append("--------------------------------------\n");
-            if (toCall == 0 && canRaise) {
+            if (toCall == 0 && canRaise && game.currentBet() > 0) {
+                // Big-blind option: the blind is live, so the next step up is a raise.
+                b.append("To act: ").append(trunc(cur.name)).append("  Min raise: ").append(game.minRaiseTo()).append("\n");
+            } else if (toCall == 0 && canRaise) {
                 b.append("To act: ").append(trunc(cur.name)).append("  Min bet: ").append(bb).append("\n");
             } else if (toCall == 0) {
                 b.append("To act: ").append(trunc(cur.name)).append("  Check only\n");
@@ -844,12 +991,29 @@ public class GameSession {
     // ------------------------------------------------------------------
 
     private long postHand(String content) {
+        return postHand(content, null, null, null);
+    }
+
+    private long postHand(String content, ActionRow row) {
+        return postHand(content, row, null, null);
+    }
+
+    /** Sends a per-hand message (tracked for cleanup). Row and image are optional. */
+    private long postHand(String content, ActionRow row, byte[] image, String filename) {
         ThreadChannel t = thread();
         if (t == null) {
+            log.warn("postHand: thread {} not visible, message dropped", threadId);
             return 0;
         }
         try {
-            long id = t.sendMessage(content).complete().getIdLong();
+            var action = t.sendMessage(clip(content));
+            if (image != null) {
+                action = action.addFiles(FileUpload.fromData(image, filename));
+            }
+            if (row != null) {
+                action = action.setComponents(row);
+            }
+            long id = action.complete().getIdLong();
             handMessageIds.add(id);
             return id;
         } catch (Exception e) {
@@ -858,48 +1022,29 @@ public class GameSession {
         }
     }
 
-    private long postHand(String content, ActionRow row) {
-        ThreadChannel t = thread();
-        if (t == null) {
-            return 0;
-        }
-        try {
-            long id = t.sendMessage(content).setComponents(row).complete().getIdLong();
-            handMessageIds.add(id);
-            return id;
-        } catch (Exception e) {
-            log.warn("postHand(row) failed", e);
-            return 0;
-        }
-    }
-
-    private long postHandWithImage(String content, byte[] image, String filename, ActionRow row) {
-        ThreadChannel t = thread();
-        if (t == null) {
-            return 0;
-        }
-        try {
-            var action = t.sendMessage(content)
-                    .addFiles(FileUpload.fromData(image, filename));
-            if (row != null) {
-                action = action.setComponents(row);
-            }
-            long id = action.complete().getIdLong();
-            handMessageIds.add(id);
-            return id;
-        } catch (Exception e) {
-            log.warn("postHandWithImage failed", e);
-            return 0;
-        }
-    }
-
     private void postRoom(String content) {
         ThreadChannel t = thread();
-        if (t != null) {
-            t.sendMessage(content).queue(s -> {
+        if (t == null) {
+            log.warn("postRoom: thread {} not visible, message dropped", threadId);
+            return;
+        }
+        try {
+            t.sendMessage(clip(content)).queue(s -> {
             }, e -> {
             });
+        } catch (Exception e) {
+            log.warn("postRoom failed", e);
         }
+    }
+
+    /** Keeps messages under Discord's 2000-char limit, closing an open code block if cut. */
+    private static String clip(String s) {
+        if (s.length() <= MAX_MESSAGE_CHARS) {
+            return s;
+        }
+        String cut = s.substring(0, MAX_MESSAGE_CHARS);
+        int fences = cut.split("```", -1).length - 1;
+        return cut + "…" + (fences % 2 != 0 ? "\n```" : "") + "\n*(truncated)*";
     }
 
     private void disablePreviousActionButtons() {
@@ -916,11 +1061,12 @@ public class GameSession {
 
     private void cleanupHandMessages() {
         ThreadChannel t = thread();
-        if (t != null) {
-            for (long id : handMessageIds) {
-                t.deleteMessageById(str(id)).queue(s -> {
-                }, e -> {
-                });
+        if (t != null && !handMessageIds.isEmpty()) {
+            try {
+                // Bulk endpoint: one REST call per 100 messages instead of one each.
+                t.purgeMessagesById(handMessageIds.stream().map(GameSession::str).toList());
+            } catch (Exception e) {
+                log.warn("cleanup failed", e);
             }
         }
         handMessageIds.clear();
@@ -961,13 +1107,13 @@ public class GameSession {
         return threadId == 0 ? null : manager.jda().getThreadChannelById(threadId);
     }
 
+    /**
+     * Sends a private followup to the interacting user. Always sets the
+     * ephemeral flag explicitly: followups after {@code deferEdit()} (buttons)
+     * are public by default, while after {@code deferReply(true)} the flag is
+     * simply redundant — so one helper is safe for every hook.
+     */
     private void ephem(InteractionHook hook, String message) {
-        hook.sendMessage(message).queue(s -> {
-        }, e -> {
-        });
-    }
-
-    private void ephemExplicit(InteractionHook hook, String message) {
         hook.sendMessage(message).setEphemeral(true).queue(s -> {
         }, e -> {
         });
@@ -1009,15 +1155,14 @@ public class GameSession {
         return cs.stream().map(Card::shortName).collect(Collectors.joining(" "));
     }
 
-    private String cardsPlain(List<Card> cs) {
-        return cs.stream().map(Card::shortName).collect(Collectors.joining(" "));
-    }
-
+    /** Sanitizes a display name for the code-block table: strips formatting
+     *  characters plus control/zero-width/bidi characters that could forge or
+     *  scramble table rows. */
     private String trunc(String name) {
         if (name == null) {
             return "?";
         }
-        String safe = name.replace("`", "").replace("@", "");
+        String safe = name.replaceAll("[`@\\p{Cntrl}\\u200B-\\u200F\\u202A-\\u202E\\u2066-\\u2069]", "");
         if (safe.isBlank()) safe = "player";
         return safe.length() > 16 ? safe.substring(0, 16) : safe;
     }

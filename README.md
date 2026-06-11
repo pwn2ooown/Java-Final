@@ -10,11 +10,11 @@ is posted in the thread, and every player sees only their own hole cards via
 ## Features
 
 - Owner opens a room and sets **buy-in, small blind and big blind** (locked once the game starts).
-- **Multiple rooms per channel** — each game gets its own private thread named `game-<8-char-id>`.
+- **Multiple rooms per channel** — each game gets its own private thread named `game-<8-char-id>` (max 3 open rooms per owner, **2–10 players** per table).
 - Players join a lobby, owner starts → **seats are randomized**.
 - Full hand loop: blinds → deal hole cards → pre-flop / flop / turn / river betting → showdown → payout → cleanup → next hand.
-- **Dealer button rotates** each hand (heads-up handled correctly).
-- Correct **No-Limit betting rules**: bet ≥ 1 BB or all-in, proper **min-raise**, and the **incomplete all-in raise** rule (a short all-in does not re-open the betting for players who already acted — Raise/All-in buttons are hidden when betting is closed).
+- **Dead button rule** (TDA rule 32): the **big blind advances exactly one live player** per hand — nobody is skipped for it and nobody pays it twice in a row. If the big-blind player busts, the next hand has a **dead small blind** (nobody posts it); if the small blind busts, the **button stays put for one hand** (dead button). Heads-up the non-BB player is button + small blind (TDA 34-B).
+- Correct **No-Limit betting rules**: bet ≥ 1 BB or all-in, proper **min-raise** — including over **short all-in opening bets** (a raise must add at least one full bet, and a big raise over a short bet sets the true min re-raise), the **incomplete all-in raise** rule (a short all-in does not re-open the betting for players who already acted — Raise/All-in buttons are hidden when betting is closed), and **cumulative short all-ins** that total a full raise re-opening the betting (TDA 47-A).
 - **Turn lock**: only the player to act can act; anyone else is rejected.
 - **Side pots** computed automatically for any number of all-ins, with **uncalled bets refunded**. Odd chips go to the first seat left of the dealer button.
 - **Card images** rendered via Graphics2D (headless) — board cards, hole cards, and card backs displayed as PNG attachments.
@@ -33,18 +33,19 @@ is posted in the thread, and every player sees only their own hole cards via
   ```
 - **Last action shown inline** next to each player in the table (check, call 20, raise 100, fold, etc.).
 - **30-second timer** per turn with a **~10s reminder ping**: 1st timeout = **auto-check** (if no bet) or **auto-fold** (if facing a bet) with warning; a **2nd *consecutive* timeout = kicked**.
-- **Show cards after hand** — 10-second window with buttons to publicly reveal one or both hole cards.
+- **Show cards after hand** — 10-second window with buttons to publicly reveal one or both hole cards; the buttons **expire** when the window closes.
 - **View my cards** button on every turn prompt — privately shows your hole cards + current best hand with card image.
-- **Action buttons** with silent acknowledgment (no confirmation popup cluttering the chat).
-- Quit any time (auto-folds the current hand, no longer dealt in), join any time (seated next hand).
-- If the **owner leaves/is kicked**, the next player by join order becomes owner.
+- **Action buttons** with silent acknowledgment (no confirmation popup cluttering the chat); slash-command actions get a small private confirmation instead.
+- **Stale-click protection** — every action button and the raise dialog are bound to the prompt they belong to; a leftover button from an earlier turn is rejected instead of betting at a price you never saw.
+- Quit any time (auto-folds the current hand, no longer dealt in), join any time (seated next hand). **Busted players** are removed once the room is waiting and can re-join for a **fresh buy-in**.
+- If the **owner leaves/is kicked**, the next player by join order becomes owner — including mid-hand and when joining an owner-less room.
 - At least **2 players** required to start.
 - **Showdown reveals every remaining player's cards.**
-- Game state, players, stacks and a hand history are persisted to **SQLite**.
-- Owner can `end` (stop after the current hand) or `forceend` (stop immediately) from any state.
+- Game state, players, stacks and a hand history are persisted to **SQLite** (WAL mode, transactional per hand).
+- Owner can `end` (stop after the current hand) or `forceend` (stop immediately — the unfinished hand is **cancelled and all bets returned**).
 - **SecureRandom** used for card and seat shuffling (cryptographic fairness).
 - Input validation: buy-in/blind/bet capped at 10M to prevent overflow.
-- Display names sanitized in code blocks to prevent formatting exploits.
+- Display names sanitized in code blocks (formatting, control and RTL-override characters stripped).
 
 ---
 
@@ -182,8 +183,8 @@ everything also has a slash-command equivalent.
 | Command | Who | Where | What it does |
 |---|---|---|---|
 | `/poker open buyin:<n> sb:<n> bb:<n>` | anyone | a text channel | Opens a room, creates the private thread, you become the owner |
-| `/poker join` | anyone | the lobby channel | Take a seat (or press the **Join** button) |
-| `/poker start` | owner | thread/lobby | Randomize seats and deal the first hand |
+| `/poker join` | anyone | the game thread | Take a seat — from the lobby channel, press the **Join** button instead |
+| `/poker start` | owner | the game thread | Randomize seats and deal the first hand (lobby: **Start** button) |
 | `/poker status` | players | thread | Show the current table |
 | `/poker leave` | players | thread | Leave (auto-folds your current hand) |
 | `/poker end` | owner | thread | Stop **after** the current hand |
@@ -247,9 +248,11 @@ JUnit tests in `src/test/java`.
 
 ## Design Notes & Assumptions
 
-- **One thread = one table** (a `GameSession`), which loops many hands until the owner ends it. Multiple rooms can exist in the same text channel — each gets a unique thread.
-- **Buy-in is fixed at open.** Busted players (stack 0) are **removed** from the room before the next hand; there is no re-buy.
-- **Timeout behavior:** 1st timeout auto-checks (if no bet to call) or auto-folds (if facing a bet). 2nd consecutive timeout kicks the player. Taking a valid action resets the warning.
-- **Per-hand cleanup keeps the result.** After each hand, play messages (table state, action prompts, reminders) are deleted, but the **result summary** (with winner highlight and show-cards buttons) is kept as thread history.
+- **One thread = one table** (a `GameSession`), which loops many hands until the owner ends it. Multiple rooms can exist in the same text channel — each gets a unique thread. Slash commands resolve by thread, so game commands must be typed **inside the thread**; the lobby message's buttons carry the thread ID and work from the parent channel.
+- **Buy-in is fixed at open.** Busted players (stack 0) are removed before the next hand. There is no re-buy mid-game, but once the room drops to **WAITING** a busted player can `/poker join` again for a fresh buy-in.
+- **Blinds use the dead button rule** (TDA 32): the BB advances one live player per hand; the SB or button can be "dead" for a hand after an elimination so that nobody skips or double-pays the big blind.
+- **Timeout behavior:** 1st timeout auto-checks (if no bet to call) or auto-folds (if facing a bet). 2nd consecutive timeout kicks the player. Taking a valid action resets the warning. If the game thread becomes invisible (archived/deleted), the clock **pauses** instead of folding players invisibly.
+- **`/poker forceend` mid-hand cancels the hand** — every chip committed to the pot is returned to its owner, so no chips are lost.
+- **Per-hand cleanup keeps the result.** After each hand, play messages (table state, action prompts, reminders) are bulk-deleted, but the **result summary** (with winner highlight) is kept as thread history; its show-cards buttons expire after the 10s window.
 - **Card rendering** uses `java.awt.Graphics2D` in headless mode — no display or custom emoji server setup needed. Winner's best five cards are highlighted with yellow borders at showdown.
 - A bot restart ends any in-progress hand; the database keeps room/player/stack and hand-history records.
