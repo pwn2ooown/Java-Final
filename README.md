@@ -53,35 +53,40 @@ is posted in the thread, and every player sees only their own hole cards via
 
 ```mermaid
 graph TD
-    subgraph Discord Layer
-        PL[PokerListener<br/>Routes commands, buttons, modals]
-        GM[GameManager<br/>Room registry by thread ID]
-        GS[GameSession<br/>Hand flow, timers, rendering]
-        CR[CardRenderer<br/>Graphics2D card images]
+    subgraph Discord["Discord Layer"]
+        M[Main<br/>JDA startup, slash-command registration,<br/>shutdown hook]
+        PL[PokerListener<br/>Routes slash commands, buttons, modals<br/>Validates input, parses tokens]
+        GM[GameManager<br/>Room registry by thread ID<br/>Per-owner room cap]
+        GS[GameSession<br/>Hand flow, timers, rendering<br/>Single-threaded executor per room]
+        CR[CardRenderer<br/>Graphics2D headless PNG<br/>Highlighted winner cards]
     end
 
-    subgraph Game Engine
-        PG[PokerGame<br/>Betting rules, streets, showdown]
-        PM[PotManager<br/>Main + side pots, refunds]
-        P[Player<br/>Stack, hole cards, state]
+    subgraph Game["Game Engine — no Discord dependency"]
+        PG[PokerGame<br/>Dead button rule, betting,<br/>streets, showdown, settle]
+        PM[PotManager<br/>Main + side pots,<br/>uncalled-bet refunds, orphan pots]
+        P[Player<br/>Stack, hole cards, per-hand state,<br/>timeout strikes, leave flag]
     end
 
-    subgraph Poker Engine
-        HE[HandEvaluator<br/>Best 5-of-7]
-        HV[HandValue<br/>Category + tiebreakers]
+    subgraph Engine["Poker Engine — pure logic"]
+        HE[HandEvaluator<br/>Best 5-of-7 combination]
+        HV[HandValue<br/>Category + kicker tiebreakers]
         D[Deck<br/>SecureRandom shuffle]
         C[Card / Rank / Suit]
     end
 
     subgraph Persistence
-        DB[(SQLite<br/>Database)]
+        CF[Config<br/>.env loader]
+        DB[(SQLite WAL<br/>Database<br/>Rooms, players, hands)]
     end
 
-    PL -->|slash cmds<br/>buttons| GS
+    M -->|creates| GM
+    M -->|registers| PL
+    M -->|shutdown order:<br/>Sessions → JDA → DB| DB
+    PL -->|slash cmds<br/>buttons, modals| GS
     PL -->|resolve by<br/>thread ID| GM
     GS -->|game logic| PG
     GS -->|card images| CR
-    GS -->|persist| DB
+    GS -->|persist in<br/>transaction| DB
     PG -->|evaluate hands| HE
     PG -->|deal cards| D
     PG -->|compute pots| PM
@@ -90,6 +95,220 @@ graph TD
     D --> C
     PG --> P
     GM --> GS
+    M -->|load config| CF
+```
+
+---
+
+## State Machine
+
+The bot manages two levels of state: a **room lifecycle** (open → playing → end) and, within each room, a **hand lifecycle** that loops until the game ends. The diagrams below show every state transition the bot can make.
+
+### Room Lifecycle
+
+```mermaid
+stateDiagram-v2
+    [*] --> Init : /poker open
+
+    Init --> WAITING : Thread created, owner seated
+    Init --> [*] : Thread creation failed (abandonInit)
+
+    WAITING --> WAITING : /poker join or /poker leave
+    WAITING --> Shuffling : /poker start (owner, ≥2 players)
+    WAITING --> CLOSED : /poker end or /poker forceend
+
+    Shuffling --> PLAYING : shuffleSeats → beginHand
+
+    PLAYING --> PLAYING : Hand ends, ≥2 eligible → next hand
+    PLAYING --> WAITING : Hand ends, fewer than 2 eligible (pruneOut)
+    PLAYING --> CLOSED : /poker end (after current hand)
+    PLAYING --> CLOSED : /poker forceend (abortHand, refund all)
+
+    WAITING --> CLOSED : All players leave
+
+    CLOSED --> [*] : Thread archived, executor shutdown, DB closed
+
+    note right of WAITING
+        Busted players are pruned.
+        Re-join allowed for fresh buy-in.
+        Owner succession by join order.
+    end note
+
+    note right of PLAYING
+        One hand loops internally.
+        stopRequested flag defers
+        end until hand finishes.
+    end note
+```
+
+### Hand Lifecycle (inside PLAYING)
+
+```mermaid
+stateDiagram-v2
+    [*] --> StartHand : beginHand()
+
+    state StartHand {
+        [*] --> RemoveBusted : Remove leavers and busted
+        RemoveBusted --> DeadButton : computePositions() per TDA 32
+        DeadButton --> Deal : Post blinds, deal 2 hole cards each
+    }
+
+    StartHand --> Preflop
+
+    state BettingRound {
+        [*] --> PromptActor : Show table + buttons with actionSeq token
+        PromptActor --> WaitForAction : Start 30s timer (20s reminder)
+
+        WaitForAction --> ValidateAction : Player acts (button, slash, modal)
+        WaitForAction --> Reminder : 20s elapsed
+        Reminder --> WaitForAction : Post warning ping
+        WaitForAction --> Timeout : 30s elapsed
+
+        ValidateAction --> RejectStale : Token mismatch (stale button)
+        RejectStale --> WaitForAction : Ephem error, keep waiting
+        ValidateAction --> RejectInvalid : InvalidActionException
+        RejectInvalid --> WaitForAction : Ephem error, keep waiting
+        ValidateAction --> ApplyAction : Valid action
+
+        Timeout --> AutoAct : 1st timeout → auto-check or fold
+        Timeout --> Kick : 2nd consecutive → fold + kick
+
+        ApplyAction --> NextActor : More players need to act
+        AutoAct --> NextActor
+        Kick --> NextActor
+
+        NextActor --> PromptActor : nextActorFrom()
+        NextActor --> RoundDone : All acted or only 1 alive
+    }
+
+    Preflop --> BettingRound
+    BettingRound --> CheckStreet : Round complete
+
+    state CheckStreet {
+        [*] --> OnlyOneAlive : aliveInHand ≤ 1
+        [*] --> AllInRunout : ableToAct fewer than 2 (all-in)
+        [*] --> NextStreet : ≥2 can still act
+    }
+
+    OnlyOneAlive --> Settle_NoReveal
+    AllInRunout --> DealRemaining : Deal board to river
+    DealRemaining --> Settle_Reveal
+    NextStreet --> DealStreet
+
+    state DealStreet {
+        [*] --> Flop : 3 cards
+        [*] --> Turn : 1 card
+        [*] --> River : 1 card
+    }
+
+    DealStreet --> BettingRound : New round, first to act left of button
+
+    state RiverComplete <<choice>>
+    BettingRound --> RiverComplete : River round done
+    RiverComplete --> Settle_Reveal : ≥2 alive → showdown
+
+    state Settlement {
+        [*] --> ComputePots : PotManager.compute()
+        ComputePots --> HandleOrphans : Merge orphan pots into last eligible
+        HandleOrphans --> EvalHands : HandEvaluator best 5-of-7
+        EvalHands --> AwardPots : Split + odd-chip rule (left of button)
+        AwardPots --> RefundUncalled : Return uncalled bets
+    }
+
+    Settle_NoReveal --> Settlement
+    Settle_Reveal --> Settlement
+
+    Settlement --> PostResults : Post winner summary + board image
+
+    PostResults --> ShowCardsWindow : 10s show-cards window
+    ShowCardsWindow --> Cleanup : Strip buttons, clear hole cards
+
+    Cleanup --> PersistHand : DB transaction, update stacks + record hand
+    PersistHand --> CleanupMessages : Bulk-delete hand messages (keep result)
+
+    CleanupMessages --> [*] : afterHand → next hand or WAITING
+```
+
+### Player Actions (during a betting round)
+
+```mermaid
+stateDiagram-v2
+    state ActionRouter {
+        [*] --> ParseInput
+
+        state ParseInput {
+            [*] --> SlashCommand : Slash commands (/fold /check /call etc.)
+            [*] --> ButtonClick : Button with embedded token
+            [*] --> RaiseModal : Modal dialog with embedded token
+        }
+
+        SlashCommand --> TokenCheck : token = −1 (always current)
+        ButtonClick --> TokenCheck : token from component ID
+        RaiseModal --> TokenCheck : token from modal ID
+
+        TokenCheck --> Rejected : token ≠ actionSeq and ≠ −1
+        TokenCheck --> Normalize : token matches
+    }
+
+    Rejected --> [*] : Stale button rejected (ephem error)
+
+    state Normalize {
+        [*] --> BET_to_RAISE : BET when currentBet > 0
+        [*] --> RAISE_to_BET : RAISE when currentBet = 0
+        [*] --> PassThrough : No change needed
+    }
+
+    state Execute {
+        [*] --> Fold
+        [*] --> Check : callAmount = 0
+        [*] --> Call : Commit min(need, stack)
+        [*] --> Bet : No existing bet, ≥ 1 BB or all-in
+        [*] --> Raise : Over current bet, ≥ minRaiseTo or all-in
+        [*] --> AllIn : Commit entire stack
+    }
+
+    Normalize --> Execute
+    Execute --> UpdateState : Clear timeout strikes, record lastAction
+    Execute --> [*] : InvalidActionException → ephem error
+
+    state AllInRules {
+        [*] --> FullRaise : increment ≥ lastFullRaiseSize → re-open
+        [*] --> CumulativeReopen : cumulative ≥ full raise (TDA 47-A)
+        [*] --> ShortAllIn : Does NOT re-open betting
+    }
+
+    UpdateState --> [*] : proceed() → next actor or street
+```
+
+### Timeout & Kick Flow
+
+```mermaid
+stateDiagram-v2
+    [*] --> Acting : Player's turn begins
+
+    Acting --> ReminderPing : 20s with no action
+    ReminderPing --> Acting : About 10s left, or auto-check/fold
+
+    Acting --> FirstTimeout : 30s total, no action
+
+    state FirstTimeout {
+        [*] --> CanCheck : callAmount = 0
+        [*] --> MustFold : callAmount > 0
+        CanCheck --> AutoCheck : Auto-check
+        MustFold --> AutoFold : Auto-fold
+    }
+
+    AutoCheck --> NextTurn : timeoutStrikes = 1 (Warning 1/2)
+    AutoFold --> NextTurn : timeoutStrikes = 1 (Warning 1/2)
+
+    NextTurn --> Acting : Same player's next turn
+
+    Acting --> SecondTimeout : 30s, still no action (consecutive)
+    SecondTimeout --> Kicked : Fold + wantsLeave, timed out again
+    Kicked --> [*] : removeFromThread()
+
+    Acting --> ResetStrikes : Player takes voluntary action
+    ResetStrikes --> [*] : timeoutStrikes = 0
 ```
 
 ---

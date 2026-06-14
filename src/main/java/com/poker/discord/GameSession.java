@@ -115,29 +115,61 @@ public class GameSession {
         return ended;
     }
 
+    /** Blocks until this session is torn down (called from the shutdown hook). */
+    void destroy() {
+        if (ended) {
+            return;
+        }
+        try {
+            exec.submit(() -> {
+                try {
+                    if (!ended) {
+                        endGame("🛑 Game terminated (server shutdown).");
+                    }
+                } catch (Exception e) {
+                    log.error("destroy failed", e);
+                }
+            }).get(5, TimeUnit.SECONDS);
+        } catch (java.util.concurrent.RejectedExecutionException e) {
+            log.warn("destroy rejected — executor already shut down");
+        } catch (Exception e) {
+            log.warn("destroy did not complete in time", e);
+            exec.shutdownNow();
+        }
+    }
+
     // ------------------------------------------------------------------
     // Executor plumbing — every task is wrapped so an unexpected exception is
     // logged instead of vanishing inside the executor's discarded future.
     // ------------------------------------------------------------------
 
     private void onExec(String what, Runnable task) {
-        exec.execute(() -> {
-            try {
-                task.run();
-            } catch (Exception e) {
-                log.error("{} failed", what, e);
-            }
-        });
+        try {
+            exec.execute(() -> {
+                try {
+                    task.run();
+                } catch (Exception e) {
+                    log.error("{} failed", what, e);
+                }
+            });
+        } catch (java.util.concurrent.RejectedExecutionException e) {
+            log.warn("{} rejected — executor already shut down", what);
+        }
     }
 
     private ScheduledFuture<?> later(String what, long delay, TimeUnit unit, Runnable task) {
-        return exec.schedule(() -> {
-            try {
-                task.run();
-            } catch (Exception e) {
-                log.error("{} failed", what, e);
-            }
-        }, delay, unit);
+        try {
+            return exec.schedule(() -> {
+                try {
+                    task.run();
+                } catch (Exception e) {
+                    log.error("{} failed", what, e);
+                }
+            }, delay, unit);
+        } catch (java.util.concurrent.RejectedExecutionException e) {
+            log.warn("{} rejected — executor already shut down", what);
+            return null;
+        }
     }
 
     // ------------------------------------------------------------------
@@ -372,6 +404,7 @@ public class GameSession {
             String roomCode = UUID.randomUUID().toString().substring(0, 8);
             ThreadChannel thread = parent.createThreadChannel("game-" + roomCode, true)
                     .setAutoArchiveDuration(ThreadChannel.AutoArchiveDuration.TIME_1_WEEK)
+                    .timeout(10, TimeUnit.SECONDS)
                     .complete();
             threadId = thread.getIdLong();
             log.info("Created private thread {} (game-{}) for room (parent {})", threadId, roomCode, parentChannelId);
@@ -808,7 +841,11 @@ public class GameSession {
             }, e -> {
             });
         }
-        exec.schedule(exec::shutdown, 5, TimeUnit.SECONDS);
+        try {
+            exec.schedule(exec::shutdown, 5, TimeUnit.SECONDS);
+        } catch (java.util.concurrent.RejectedExecutionException ignored) {
+            exec.shutdown();
+        }
     }
 
     // ------------------------------------------------------------------
@@ -1013,7 +1050,7 @@ public class GameSession {
             if (row != null) {
                 action = action.setComponents(row);
             }
-            long id = action.complete().getIdLong();
+            long id = action.timeout(10, TimeUnit.SECONDS).complete().getIdLong();
             handMessageIds.add(id);
             return id;
         } catch (Exception e) {
