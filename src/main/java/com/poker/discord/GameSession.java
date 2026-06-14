@@ -115,29 +115,47 @@ public class GameSession {
         return ended;
     }
 
+    /** Allows an external thread (e.g. shutdown hook) to safely tear down this session. */
+    void destroy() {
+        onExec("destroy", () -> {
+            if (!ended) {
+                endGame("🛑 Game terminated (server shutdown).");
+            }
+        });
+    }
+
     // ------------------------------------------------------------------
     // Executor plumbing — every task is wrapped so an unexpected exception is
     // logged instead of vanishing inside the executor's discarded future.
     // ------------------------------------------------------------------
 
     private void onExec(String what, Runnable task) {
-        exec.execute(() -> {
-            try {
-                task.run();
-            } catch (Exception e) {
-                log.error("{} failed", what, e);
-            }
-        });
+        try {
+            exec.execute(() -> {
+                try {
+                    task.run();
+                } catch (Exception e) {
+                    log.error("{} failed", what, e);
+                }
+            });
+        } catch (java.util.concurrent.RejectedExecutionException e) {
+            log.warn("{} rejected — executor already shut down", what);
+        }
     }
 
     private ScheduledFuture<?> later(String what, long delay, TimeUnit unit, Runnable task) {
-        return exec.schedule(() -> {
-            try {
-                task.run();
-            } catch (Exception e) {
-                log.error("{} failed", what, e);
-            }
-        }, delay, unit);
+        try {
+            return exec.schedule(() -> {
+                try {
+                    task.run();
+                } catch (Exception e) {
+                    log.error("{} failed", what, e);
+                }
+            }, delay, unit);
+        } catch (java.util.concurrent.RejectedExecutionException e) {
+            log.warn("{} rejected — executor already shut down", what);
+            return null;
+        }
     }
 
     // ------------------------------------------------------------------
@@ -808,7 +826,11 @@ public class GameSession {
             }, e -> {
             });
         }
-        exec.schedule(exec::shutdown, 5, TimeUnit.SECONDS);
+        try {
+            exec.schedule(exec::shutdown, 5, TimeUnit.SECONDS);
+        } catch (java.util.concurrent.RejectedExecutionException ignored) {
+            exec.shutdown();
+        }
     }
 
     // ------------------------------------------------------------------

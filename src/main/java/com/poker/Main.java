@@ -58,8 +58,9 @@ public class Main {
         log.info("Poker bot is ready.");
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            // Stop taking Discord events first, then close the database, so no
-            // in-flight game write lands on a closed connection.
+            // End live games cleanly (refund in-progress hands), then stop
+            // Discord events, then close the database.
+            manager.destroyAll();
             jda.shutdown();
             try {
                 if (!jda.awaitShutdown(java.time.Duration.ofSeconds(5))) {

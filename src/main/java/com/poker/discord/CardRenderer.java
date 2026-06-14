@@ -55,23 +55,25 @@ public final class CardRenderer {
 
         BufferedImage img = new BufferedImage(totalW, totalH, BufferedImage.TYPE_INT_ARGB);
         Graphics2D g = img.createGraphics();
-        g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-        g.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
+        try {
+            g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+            g.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
 
-        g.setColor(BG);
-        g.fillRoundRect(0, 0, totalW, totalH, 12, 12);
+            g.setColor(BG);
+            g.fillRoundRect(0, 0, totalW, totalH, 12, 12);
 
-        for (int i = 0; i < n; i++) {
-            int x = PAD + i * (CARD_W + GAP);
-            drawCard(g, cards.get(i), x, PAD);
-            if (hlSet.contains(cards.get(i).shortName())) {
-                g.setColor(HIGHLIGHT);
-                g.setStroke(HIGHLIGHT_STROKE);
-                g.drawRoundRect(x + 1, PAD + 1, CARD_W - 3, CARD_H - 3, RADIUS, RADIUS);
+            for (int i = 0; i < n; i++) {
+                int x = PAD + i * (CARD_W + GAP);
+                drawCard(g, cards.get(i), x, PAD);
+                if (hlSet.contains(cards.get(i).shortName())) {
+                    g.setColor(HIGHLIGHT);
+                    g.setStroke(HIGHLIGHT_STROKE);
+                    g.drawRoundRect(x + 1, PAD + 1, CARD_W - 3, CARD_H - 3, RADIUS, RADIUS);
+                }
             }
+        } finally {
+            g.dispose();
         }
-
-        g.dispose();
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         ImageIO.write(img, "png", out);
         return out.toByteArray();

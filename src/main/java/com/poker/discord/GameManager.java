@@ -59,4 +59,13 @@ public class GameManager {
             byThread.remove(session.threadId());
         }
     }
+
+    /** Gracefully tears down all live sessions (called from the shutdown hook). */
+    public void destroyAll() {
+        for (GameSession s : byThread.values()) {
+            if (!s.ended()) {
+                s.destroy();
+            }
+        }
+    }
 }
