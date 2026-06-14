@@ -81,7 +81,7 @@ graph TD
 
     M -->|creates| GM
     M -->|registers| PL
-    M -->|shutdown order:<br/>JDA → DB| DB
+    M -->|shutdown order:<br/>Sessions → JDA → DB| DB
     PL -->|slash cmds<br/>buttons, modals| GS
     PL -->|resolve by<br/>thread ID| GM
     GS -->|game logic| PG

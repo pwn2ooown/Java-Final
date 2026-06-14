@@ -115,13 +115,27 @@ public class GameSession {
         return ended;
     }
 
-    /** Allows an external thread (e.g. shutdown hook) to safely tear down this session. */
+    /** Blocks until this session is torn down (called from the shutdown hook). */
     void destroy() {
-        onExec("destroy", () -> {
-            if (!ended) {
-                endGame("🛑 Game terminated (server shutdown).");
-            }
-        });
+        if (ended) {
+            return;
+        }
+        try {
+            exec.submit(() -> {
+                try {
+                    if (!ended) {
+                        endGame("🛑 Game terminated (server shutdown).");
+                    }
+                } catch (Exception e) {
+                    log.error("destroy failed", e);
+                }
+            }).get(5, TimeUnit.SECONDS);
+        } catch (java.util.concurrent.RejectedExecutionException e) {
+            log.warn("destroy rejected — executor already shut down");
+        } catch (Exception e) {
+            log.warn("destroy did not complete in time", e);
+            exec.shutdownNow();
+        }
     }
 
     // ------------------------------------------------------------------
@@ -390,6 +404,7 @@ public class GameSession {
             String roomCode = UUID.randomUUID().toString().substring(0, 8);
             ThreadChannel thread = parent.createThreadChannel("game-" + roomCode, true)
                     .setAutoArchiveDuration(ThreadChannel.AutoArchiveDuration.TIME_1_WEEK)
+                    .timeout(10, TimeUnit.SECONDS)
                     .complete();
             threadId = thread.getIdLong();
             log.info("Created private thread {} (game-{}) for room (parent {})", threadId, roomCode, parentChannelId);
@@ -1035,7 +1050,7 @@ public class GameSession {
             if (row != null) {
                 action = action.setComponents(row);
             }
-            long id = action.complete().getIdLong();
+            long id = action.timeout(10, TimeUnit.SECONDS).complete().getIdLong();
             handMessageIds.add(id);
             return id;
         } catch (Exception e) {

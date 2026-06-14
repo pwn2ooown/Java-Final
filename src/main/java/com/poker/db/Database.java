@@ -241,6 +241,9 @@ public class Database {
             ps.executeUpdate();
         } catch (SQLException e) {
             log.warn("SQL failed: {}", sql, e);
+            if (!isAutoCommit()) {
+                throw new RuntimeException(e);
+            }
         }
     }
 
@@ -256,7 +259,18 @@ public class Database {
             }
         } catch (SQLException e) {
             log.warn("SQL failed: {}", sql, e);
+            if (!isAutoCommit()) {
+                throw new RuntimeException(e);
+            }
         }
         return -1;
+    }
+
+    private boolean isAutoCommit() {
+        try {
+            return conn.getAutoCommit();
+        } catch (SQLException e) {
+            return true;
+        }
     }
 }
