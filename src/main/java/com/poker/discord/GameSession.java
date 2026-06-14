@@ -590,18 +590,21 @@ public class GameSession {
                 game.dealNextStreet();
                 log.debug("Hand #{}: dealt {} — board: {} (ableToAct={})",
                         game.handNumber(), game.street(), cards(game.board()), ableNow);
-                postStreetAnnouncement();
                 if (ableNow < 2) {
                     log.debug("Hand #{}: all-in run-out from {} to RIVER", game.handNumber(), game.street());
+                    // Announce intermediate streets for the dramatic reveal,
+                    // but skip the river — the showdown displays the full board
+                    // with the winner's best five highlighted.
                     while (game.street() != com.poker.game.Street.RIVER) {
+                        postStreetAnnouncement();
                         game.dealNextStreet();
                         log.debug("Hand #{}: dealt {} — board: {}",
                                 game.handNumber(), game.street(), cards(game.board()));
                     }
-                    postStreetAnnouncement();
                     finishHand(true);
                     return;
                 }
+                postStreetAnnouncement();
             } else {
                 promptCurrentActor();
                 return;
